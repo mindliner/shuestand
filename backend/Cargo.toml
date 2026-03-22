@@ -1,0 +1,32 @@
+[package]
+name = "backend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = { version = "0.7", features = ["macros", "json"] }
+tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "time"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tower = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+anyhow = "1.0"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+uuid = { version = "1", features = ["v4", "v5"] }
+clap = { version = "4.5", features = ["derive"] }
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "macros", "chrono", "uuid", "postgres", "migrate"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+bdk = { version = "0.29", default-features = false, features = ["keys-bip39", "std", "use-esplora-ureq", "electrum"] }
+electrum-client = "0.18"
+thiserror = "1.0"
+urlencoding = "2.1"
+async-trait = "0.1"
+cdk = "0.15"
+cdk-sqlite = "0.15"
+rand = "0.8"
+prometheus-client = "0.22"
+
+[patch.crates-io]
+sqlx-sqlite = { path = "../../vendor/sqlx-sqlite-0.7.4" }
