@@ -21,6 +21,9 @@ const DEFAULT_FLOAT_TARGET_SATS: u64 = 500_000;
 const DEFAULT_FLOAT_MIN_RATIO: f32 = 0.5;
 const DEFAULT_FLOAT_MAX_RATIO: f32 = 2.0;
 const DEFAULT_FLOAT_GUARD_INTERVAL_SECS: u64 = 30;
+const DEFAULT_WITHDRAWAL_MIN_SATS: u64 = 50_000;
+const DEFAULT_FLOAT_DRIFT_ALERT_RATIO: f32 = 0.1;
+const DEFAULT_SINGLE_REQUEST_RATIO: f64 = 0.5;
 
 #[derive(Clone)]
 pub struct AppConfig {
@@ -49,6 +52,9 @@ pub struct AppConfig {
     pub float_min_ratio: f32,
     pub float_max_ratio: f32,
     pub float_guard_interval: Duration,
+    pub withdrawal_min_sats: u64,
+    pub float_drift_alert_ratio: f32,
+    pub single_request_cap_ratio: f64,
 }
 
 impl AppConfig {
@@ -121,6 +127,11 @@ impl AppConfig {
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|v| *v > 0.0)
             .unwrap_or(DEFAULT_WITHDRAWAL_PAYOUT_FEE_RATE_VB);
+        let withdrawal_min_sats = std::env::var("WITHDRAWAL_MIN_SATS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_WITHDRAWAL_MIN_SATS);
 
         let deposit_worker_interval = Duration::from_secs(
             std::env::var("DEPOSIT_WORKER_INTERVAL_SECS")
@@ -169,6 +180,16 @@ impl AppConfig {
                 .filter(|v| *v > 0)
                 .unwrap_or(DEFAULT_FLOAT_GUARD_INTERVAL_SECS),
         );
+        let float_drift_alert_ratio = std::env::var("FLOAT_DRIFT_ALERT_RATIO")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(DEFAULT_FLOAT_DRIFT_ALERT_RATIO);
+        let single_request_cap_ratio = std::env::var("SINGLE_REQUEST_CAP_RATIO")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| (0.0..=1.0).contains(v))
+            .unwrap_or(DEFAULT_SINGLE_REQUEST_RATIO);
 
         if bitcoin_wallet_seed.is_some()
             && (bitcoin_descriptor.is_none()
@@ -220,6 +241,9 @@ impl AppConfig {
             float_min_ratio,
             float_max_ratio,
             float_guard_interval,
+            withdrawal_min_sats,
+            float_drift_alert_ratio,
+            single_request_cap_ratio,
         }
     }
 }

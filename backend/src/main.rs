@@ -16,7 +16,7 @@ use backend::workers::withdrawal::{
 };
 use bdk::bitcoin::{Address, Network};
 use cdk::mint_url::MintUrl;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use electrum_client::{
     Client as ElectrumRpcClient, ConfigBuilder as ElectrumConfigBuilder, ElectrumApi,
     Socks5Config as ElectrumSocks5Config,
@@ -46,6 +46,7 @@ const MAX_DEPOSIT_SATS: u64 = 2_000_000;
 const ADDRESS_POOL_REFILL_INTERVAL_SECS: u64 = 60;
 const ELECTRUM_RETRY: u8 = 5;
 const ELECTRUM_TIMEOUT_SECS: u8 = 30;
+const PREDEPOSIT_TX_TOLERANCE_SECS: i64 = 600; // 10 minutes
 
 #[derive(Clone, Copy, PartialEq)]
 enum FloatBand {
@@ -120,6 +121,8 @@ struct AppState {
     float_target_sats: u64,
     float_min_ratio: f32,
     float_max_ratio: f32,
+    withdrawal_min_sats: u64,
+    single_request_cap_ratio: f64,
 }
 
 #[tokio::main]
@@ -343,6 +346,7 @@ async fn main() -> Result<(), anyhow::Error> {
         let min_ratio = config.float_min_ratio;
         let max_ratio = config.float_max_ratio;
         let interval = config.float_guard_interval;
+        let drift_alert_ratio = config.float_drift_alert_ratio;
 
         tokio::spawn(async move {
             monitor_float_levels(
@@ -353,6 +357,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 target,
                 min_ratio,
                 max_ratio,
+                drift_alert_ratio,
                 interval,
             )
             .await;
@@ -469,11 +474,17 @@ async fn main() -> Result<(), anyhow::Error> {
         float_target_sats: config.float_target_sats,
         float_min_ratio: config.float_min_ratio,
         float_max_ratio: config.float_max_ratio,
+        withdrawal_min_sats: config.withdrawal_min_sats,
+        single_request_cap_ratio: config.single_request_cap_ratio,
     };
 
     let app = http::router(state).layer(cors);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    let port = std::env::var("SHUESTAND_BACKEND_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(8080);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!(%addr, "shuestand backend listening");
 
     axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
@@ -489,12 +500,15 @@ async fn monitor_float_levels(
     target_sats: u64,
     min_ratio: f32,
     max_ratio: f32,
+    drift_alert_ratio: f32,
     interval: Duration,
 ) {
     if target_sats == 0 {
         tracing::warn!(target: "backend", "FLOAT_TARGET_SATS is zero; float guard disabled");
         return;
     }
+
+    let mut drift_alert_active = false;
 
     loop {
         let onchain_snapshot =
@@ -527,6 +541,35 @@ async fn monitor_float_levels(
             }
             guard.onchain = onchain_snapshot.clone();
             guard.cashu = cashu_snapshot.clone();
+        }
+
+        let total_balance = onchain_snapshot.balance_sats + cashu_snapshot.balance_sats;
+        let drift = target_sats as i64 - total_balance as i64;
+        if target_sats > 0 {
+            let total_ratio = total_balance as f64 / target_sats as f64;
+            metrics.set_total_float_ratio(total_ratio);
+            metrics.set_float_drift_sats(drift);
+            let drift_ratio = (drift.abs() as f64) / target_sats as f64;
+            if drift_ratio >= drift_alert_ratio as f64 {
+                if !drift_alert_active {
+                    tracing::warn!(
+                        target: "backend",
+                        total_balance_sats = total_balance,
+                        target_sats,
+                        drift_sats = drift,
+                        "total float drift exceeded threshold"
+                    );
+                    drift_alert_active = true;
+                }
+            } else if drift_alert_active {
+                tracing::info!(
+                    target: "backend",
+                    total_balance_sats = total_balance,
+                    target_sats,
+                    "total float drift back within guard rails"
+                );
+                drift_alert_active = false;
+            }
         }
 
         sleep(interval).await;
@@ -666,6 +709,22 @@ async fn process_confirmations(db: &Database, chain: &dyn ChainSource) -> Result
 
     for deposit in deposits {
         if let Some(observation) = chain.first_matching_tx(&deposit.address).await? {
+            if observation.confirmed {
+                if let Some(seen_at) = observation.seen_at {
+                    if seen_at + ChronoDuration::seconds(PREDEPOSIT_TX_TOLERANCE_SECS)
+                        < deposit.created_at
+                    {
+                        tracing::info!(
+                            target: "backend",
+                            deposit_id = %deposit.id,
+                            txid = %observation.txid,
+                            "ignoring transaction confirmed before deposit was created"
+                        );
+                        continue;
+                    }
+                }
+            }
+
             let confirmations = if observation.confirmed {
                 match observation.block_height {
                     Some(height) if tip_height >= height => tip_height - height + 1,
@@ -750,6 +809,7 @@ struct EsploraTx {
 struct EsploraStatus {
     confirmed: bool,
     block_height: Option<u32>,
+    block_time: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -763,6 +823,26 @@ struct ObservedTx {
     txid: String,
     confirmed: bool,
     block_height: Option<u32>,
+    seen_at: Option<DateTime<Utc>>,
+}
+
+fn unix_seconds_to_datetime(ts: u64) -> Option<DateTime<Utc>> {
+    DateTime::<Utc>::from_timestamp(ts as i64, 0)
+}
+
+fn tx_rank(confirmed: bool, block_height: Option<u32>) -> u64 {
+    if !confirmed {
+        return u64::MAX;
+    }
+    block_height.map(|h| h as u64).unwrap_or(0)
+}
+
+fn is_newer(candidate: &ObservedTx, current: &ObservedTx) -> bool {
+    match (candidate.seen_at, current.seen_at) {
+        (Some(cand), Some(curr)) => cand > curr,
+        (Some(_), None) => true,
+        _ => false,
+    }
 }
 
 #[async_trait]
@@ -787,20 +867,38 @@ impl ChainSource for EsploraClient {
             return Ok(None);
         }
         let txs: Vec<EsploraTx> = resp.error_for_status()?.json().await?;
+        let mut best: Option<(ObservedTx, u64)> = None;
         for tx in txs {
             let matches = tx
                 .vout
                 .iter()
                 .any(|v| v.scriptpubkey_address.as_deref() == Some(address));
-            if matches {
-                return Ok(Some(ObservedTx {
-                    txid: tx.txid,
-                    confirmed: tx.status.confirmed,
-                    block_height: tx.status.block_height,
-                }));
+            if !matches {
+                continue;
+            }
+            let seen_at = if tx.status.confirmed {
+                tx.status.block_time.and_then(unix_seconds_to_datetime)
+            } else {
+                None
+            };
+            let candidate = ObservedTx {
+                txid: tx.txid,
+                confirmed: tx.status.confirmed,
+                block_height: tx.status.block_height,
+                seen_at,
+            };
+            let rank = tx_rank(tx.status.confirmed, tx.status.block_height);
+            match &mut best {
+                None => best = Some((candidate, rank)),
+                Some((best_tx, best_rank)) => {
+                    if rank > *best_rank || (rank == *best_rank && is_newer(&candidate, best_tx)) {
+                        *best_tx = candidate;
+                        *best_rank = rank;
+                    }
+                }
             }
         }
-        Ok(None)
+        Ok(best.map(|(tx, _)| tx))
     }
 }
 
@@ -845,10 +943,25 @@ impl ChainSource for ElectrumChainSource {
         } else {
             None
         };
+        let seen_at = if confirmed {
+            let height = item.height as usize;
+            let client = self.client.clone();
+            let header = spawn_blocking(move || {
+                client
+                    .lock()
+                    .expect("electrum client poisoned")
+                    .block_header(height)
+            })
+            .await??;
+            unix_seconds_to_datetime(header.time as u64)
+        } else {
+            None
+        };
         Ok(Some(ObservedTx {
             txid: item.tx_hash.to_string(),
             confirmed,
             block_height,
+            seen_at,
         }))
     }
 }

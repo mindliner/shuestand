@@ -24,17 +24,25 @@ export interface Deposit {
 }
 
 export type WithdrawalState =
+  | 'funding'
   | 'queued'
   | 'broadcasting'
   | 'confirming'
   | 'settled'
   | 'failed'
 
+export interface WithdrawalPaymentRequest {
+  creq: string
+  expires_at?: string | null
+  fulfilled_at?: string | null
+}
+
 export interface Withdrawal {
   id: string
   state: WithdrawalState
   delivery_address: string
   max_fee_sats?: number | null
+  requested_amount_sats?: number | null
   token_value_sats?: number | null
   txid?: string | null
   fee_paid_sats?: number | null
@@ -42,6 +50,7 @@ export interface Withdrawal {
   is_foreign_mint?: boolean | null
   token_consumed: boolean
   swap_fee_sats?: number | null
+  payment_request?: WithdrawalPaymentRequest | null
   last_attempt_at?: string | null
   attempt_count: number
   created_at?: string | null
@@ -64,9 +73,11 @@ export interface CreateDepositRequest {
 }
 
 export interface CreateWithdrawalRequest {
-  token: string
+  amount_sats: number
   delivery_address: string
+  token?: string
   max_fee_sats?: number
+  create_payment_request?: boolean
 }
 
 export interface WalletBalanceResponse {
@@ -143,4 +154,6 @@ export interface FloatStatusResponse {
   max_ratio: number
   onchain: WalletFloatStatus
   cashu: WalletFloatStatus
+  total_balance_sats?: number
+  drift_sats?: number
 }

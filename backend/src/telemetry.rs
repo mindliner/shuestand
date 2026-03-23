@@ -11,6 +11,8 @@ pub struct AppMetrics {
     withdrawal_failure_total: Counter,
     onchain_float_ratio: Gauge<i64>,
     cashu_float_ratio: Gauge<i64>,
+    total_float_ratio: Gauge<i64>,
+    float_drift_sats: Gauge<i64>,
 }
 
 impl AppMetrics {
@@ -59,6 +61,20 @@ impl AppMetrics {
             cashu_float_ratio.clone(),
         );
 
+        let total_float_ratio = Gauge::<i64>::default();
+        registry.register(
+            "total_float_ratio",
+            "Combined on-chain + Cashu balance / target ratio",
+            total_float_ratio.clone(),
+        );
+
+        let float_drift_sats = Gauge::<i64>::default();
+        registry.register(
+            "float_drift_sats",
+            "Target float - (on-chain + Cashu) balance in sats (negative means surplus)",
+            float_drift_sats.clone(),
+        );
+
         Self {
             registry,
             wallet_sync_total,
@@ -67,6 +83,8 @@ impl AppMetrics {
             withdrawal_failure_total,
             onchain_float_ratio,
             cashu_float_ratio,
+            total_float_ratio,
+            float_drift_sats,
         }
     }
 
@@ -92,6 +110,14 @@ impl AppMetrics {
 
     pub fn set_cashu_float_ratio(&self, ratio: f64) {
         self.cashu_float_ratio.set((ratio * 1000.0) as i64);
+    }
+
+    pub fn set_total_float_ratio(&self, ratio: f64) {
+        self.total_float_ratio.set((ratio * 1000.0) as i64);
+    }
+
+    pub fn set_float_drift_sats(&self, drift: i64) {
+        self.float_drift_sats.set(drift);
     }
 
     pub fn encode(&self) -> String {

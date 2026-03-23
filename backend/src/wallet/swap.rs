@@ -5,9 +5,9 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use cdk::Amount;
 use cdk::amount::SplitTarget;
-use cdk::nuts::PaymentMethod;
 use cdk::nuts::nut00::KnownMethod;
-use cdk::wallet::ReceiveOptions;
+use cdk::nuts::{PaymentMethod, ProofsMethods, State};
+use cdk::wallet::{MeltQuote, ReceiveOptions};
 use thiserror::Error;
 use tokio::time::sleep;
 
@@ -60,11 +60,27 @@ impl MintSwapService {
             return Err(anyhow!("foreign token had zero value"));
         }
 
+        let (mut proofs_total, mut input_fee_total) = self
+            .spendable_amount_and_fee(&foreign_wallet)
+            .await
+            .context("reading foreign wallet balance for swap")?;
+        if proofs_total == 0 || proofs_total <= input_fee_total {
+            return Err(anyhow!(
+                "foreign wallet has no spendable balance after importing token"
+            ));
+        }
+
         let canonical_wallet = self.manager.canonical_wallet();
-        let mut target_amount = original_amount;
+        let mut target_amount = proofs_total
+            .saturating_sub(input_fee_total)
+            .min(original_amount);
         let mut last_err: Option<anyhow::Error> = None;
 
         for _ in 0..=MAX_MELT_FEE_REDUCTIONS {
+            if target_amount == 0 {
+                break;
+            }
+
             let quote = {
                 let guard = canonical_wallet.lock().await;
                 guard
@@ -78,8 +94,51 @@ impl MintSwapService {
                     .context("requesting mint quote from canonical mint")?
             };
 
+            let melt_quote = {
+                let guard = foreign_wallet.lock().await;
+                guard
+                    .melt_quote(
+                        PaymentMethod::Known(KnownMethod::Bolt11),
+                        &quote.request,
+                        None,
+                        None,
+                    )
+                    .await
+                    .context("requesting melt quote from foreign mint")?
+            };
+            let fee_reserve = melt_quote.fee_reserve.to_u64();
+
+            let needed = target_amount
+                .saturating_add(fee_reserve)
+                .saturating_add(input_fee_total);
+            if needed > proofs_total {
+                let mut next_target = proofs_total
+                    .saturating_sub(input_fee_total + fee_reserve)
+                    .min(target_amount);
+                if next_target >= target_amount {
+                    next_target = target_amount.saturating_sub(fee_reserve.max(1));
+                }
+                if next_target == 0 {
+                    last_err = Some(anyhow!(
+                        "insufficient melt balance (fee_reserve={fee_reserve})"
+                    ));
+                    break;
+                }
+                tracing::warn!(
+                    target: "backend",
+                    target_amount,
+                    fee_reserve,
+                    spendable_sats = proofs_total,
+                    input_fee_sats = input_fee_total,
+                    next_target,
+                    "melt would exceed spendable balance; shrinking invoice before attempting payment"
+                );
+                target_amount = next_target;
+                continue;
+            }
+
             match self
-                .pay_invoice_with_foreign_wallet(&foreign_wallet, &quote.request)
+                .confirm_melt_with_quote(&foreign_wallet, melt_quote)
                 .await
             {
                 Ok(_) => {
@@ -92,35 +151,36 @@ impl MintSwapService {
                     });
                 }
                 Err(MeltPaymentError::InsufficientFunds { fee_reserve }) => {
-                    if target_amount == 0 {
-                        return Err(anyhow!(
-                            "foreign melt reported insufficient funds even after exhausting invoice reductions"
-                        ));
+                    last_err = Some(anyhow!(
+                        "insufficient melt balance (fee_reserve={fee_reserve})"
+                    ));
+                    let (updated_total, updated_fee) = self
+                        .spendable_amount_and_fee(&foreign_wallet)
+                        .await
+                        .context("refreshing foreign wallet balance after melt failure")?;
+                    proofs_total = updated_total;
+                    input_fee_total = updated_fee;
+                    if proofs_total == 0 || proofs_total <= input_fee_total {
+                        break;
                     }
-                    let fee_ratio = if target_amount > 0 {
-                        fee_reserve as f64 / target_amount as f64
-                    } else {
-                        0.0
-                    };
-                    let mut next_target = if fee_ratio > 0.0 {
-                        ((original_amount as f64) / (1.0 + fee_ratio)).floor() as u64
-                    } else {
-                        original_amount.saturating_sub(fee_reserve)
-                    };
+                    let mut next_target = proofs_total
+                        .saturating_sub(input_fee_total + fee_reserve)
+                        .min(target_amount);
                     if next_target >= target_amount {
                         next_target = target_amount.saturating_sub(fee_reserve.max(1));
+                    }
+                    if next_target == 0 {
+                        break;
                     }
                     tracing::warn!(
                         target: "backend",
                         target_amount,
                         fee_reserve,
-                        fee_ratio,
+                        spendable_sats = proofs_total,
+                        input_fee_sats = input_fee_total,
                         next_target,
-                        "foreign melt reported insufficient funds; recalculating invoice amount"
+                        "foreign melt still reported insufficient funds after swap; shrinking invoice again"
                     );
-                    last_err = Some(anyhow!(
-                        "insufficient melt balance (fee_reserve={fee_reserve})"
-                    ));
                     target_amount = next_target;
                     continue;
                 }
@@ -166,22 +226,12 @@ impl MintSwapService {
         }
     }
 
-    async fn pay_invoice_with_foreign_wallet(
+    async fn confirm_melt_with_quote(
         &self,
         wallet: &WalletHandle,
-        invoice: &str,
+        melt_quote: MeltQuote,
     ) -> Result<(), MeltPaymentError> {
         let guard = wallet.lock().await;
-        let melt_quote = guard
-            .melt_quote(
-                PaymentMethod::Known(KnownMethod::Bolt11),
-                invoice,
-                None,
-                None,
-            )
-            .await
-            .map_err(|err| MeltPaymentError::Other(err.into()))?;
-
         let prepared = guard
             .prepare_melt(&melt_quote.id, HashMap::new())
             .await
@@ -213,7 +263,10 @@ impl MintSwapService {
                     .check_mint_quote_status(quote_id)
                     .await
                     .context("checking mint quote status")?;
-                if status.state == cdk::nuts::MintQuoteState::Issued {
+                if matches!(
+                    status.state,
+                    cdk::nuts::MintQuoteState::Issued | cdk::nuts::MintQuoteState::Paid
+                ) {
                     drop(guard);
                     let guard = wallet.lock().await;
                     let proofs = guard
@@ -233,5 +286,24 @@ impl MintSwapService {
             "mint quote {} was never issued after polling",
             quote_id
         ))
+    }
+
+    async fn spendable_amount_and_fee(&self, wallet: &WalletHandle) -> anyhow::Result<(u64, u64)> {
+        let guard = wallet.lock().await;
+        let proofs = guard
+            .get_proofs_with(Some(vec![State::Unspent]), None)
+            .await
+            .context("fetching unspent proofs for swap")?;
+        let total = proofs
+            .total_amount()
+            .context("summing foreign proof amounts")?
+            .to_u64();
+        let fee = guard
+            .get_proofs_fee(&proofs)
+            .await
+            .context("estimating input fee for foreign proofs")?
+            .total
+            .to_u64();
+        Ok((total, fee))
     }
 }

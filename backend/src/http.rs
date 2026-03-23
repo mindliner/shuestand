@@ -3,18 +3,20 @@ use axum::{
     extract::{Path, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{AUTHORIZATION, CONTENT_TYPE},
+        header::{AUTHORIZATION, CONTENT_TYPE, HOST},
     },
     response::IntoResponse,
     routing::{get, post},
 };
-use chrono::Utc;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Instant};
+use serde_json::json;
+use std::{borrow::ToOwned, fs, sync::Arc, time::Instant};
 use uuid::Uuid;
 
 use crate::AppState;
-use backend::cashu::{TokenMintError, token_mint_url};
+use backend::cashu::{TokenMintError, token_mint_url, token_total_amount};
 use backend::db::{Deposit, DepositState, Withdrawal, WithdrawalState};
 use backend::onchain::{OnchainBalance, OnchainWallet};
 use backend::wallet::WalletHandle;
@@ -27,6 +29,7 @@ use urlencoding::encode;
 
 type ApiResult<T> = Result<Json<ApiResponse<T>>, (StatusCode, Json<ApiError>)>;
 const WALLET_TOPUP_LABEL: &str = "Shuestand hot wallet top-up";
+const PAYMENT_REQUEST_TTL_SECS: i64 = 300;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -36,6 +39,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/deposits/:id", get(get_deposit))
         .route("/api/v1/withdrawals", post(request_withdrawal))
         .route("/api/v1/withdrawals/:id", get(get_withdrawal))
+        .route(
+            "/api/v1/withdrawals/:id/nut18",
+            post(submit_payment_request),
+        )
         .route("/api/v1/wallet/balance", get(get_wallet_balance))
         .route("/api/v1/wallet/send", post(send_wallet_payment))
         .route("/api/v1/wallet/sync", post(sync_wallet))
@@ -75,10 +82,23 @@ struct DepositRequest {
 
 #[derive(Deserialize, Debug)]
 struct WithdrawalRequest {
-    token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
     delivery_address: String,
+    amount_sats: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_fee_sats: Option<u64>,
+    #[serde(default)]
+    create_payment_request: bool,
+}
+
+#[derive(Serialize)]
+struct WithdrawalPaymentRequestView {
+    creq: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fulfilled_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -89,6 +109,8 @@ struct WithdrawalView {
     source_mint_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     is_foreign_mint: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payment_request: Option<WithdrawalPaymentRequestView>,
 }
 
 impl WithdrawalView {
@@ -99,25 +121,81 @@ impl WithdrawalView {
     ) -> Self {
         let source_mint_url = if let Some(url) = known_mint {
             Some(url)
-        } else {
-            match token_mint_url(&withdrawal.token) {
+        } else if let Some(token) = withdrawal.token.as_deref() {
+            match token_mint_url(token) {
                 Ok(url) => Some(url),
                 Err(err) => {
                     tracing::warn!(target: "backend", error = %err, id = %withdrawal.id, "failed to parse mint for withdrawal");
                     None
                 }
             }
+        } else {
+            None
         };
         let is_foreign_mint = match (canonical_mint, source_mint_url.as_deref()) {
             (Some(expected), Some(actual)) => Some(actual != expected),
             _ => None,
         };
+        let payment_request =
+            withdrawal
+                .payment_request_creq
+                .as_ref()
+                .map(|creq| WithdrawalPaymentRequestView {
+                    creq: creq.clone(),
+                    expires_at: withdrawal
+                        .payment_request_expires_at
+                        .map(|ts| ts.to_rfc3339()),
+                    fulfilled_at: withdrawal
+                        .payment_request_fulfilled_at
+                        .map(|ts| ts.to_rfc3339()),
+                });
         Self {
             withdrawal,
             source_mint_url,
             is_foreign_mint,
+            payment_request,
         }
     }
+}
+
+#[derive(Serialize)]
+struct Nut18LockOption {
+    #[serde(rename = "k")]
+    kind: String,
+    #[serde(rename = "d")]
+    data: String,
+    #[serde(rename = "t", skip_serializing_if = "Option::is_none")]
+    tags: Option<Vec<Vec<String>>>,
+}
+
+#[derive(Serialize)]
+struct Nut18Transport {
+    #[serde(rename = "t")]
+    kind: String,
+    #[serde(rename = "a")]
+    target: String,
+    #[serde(rename = "g", skip_serializing_if = "Option::is_none")]
+    tags: Option<Vec<Vec<String>>>,
+}
+
+#[derive(Serialize)]
+struct Nut18PaymentRequest {
+    #[serde(rename = "i", skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(rename = "a", skip_serializing_if = "Option::is_none")]
+    amount: Option<u64>,
+    #[serde(rename = "u", skip_serializing_if = "Option::is_none")]
+    unit: Option<String>,
+    #[serde(rename = "s", skip_serializing_if = "Option::is_none")]
+    single_use: Option<bool>,
+    #[serde(rename = "m", skip_serializing_if = "Option::is_none")]
+    mints: Option<Vec<String>>,
+    #[serde(rename = "d", skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(rename = "t", skip_serializing_if = "Option::is_none")]
+    transports: Option<Vec<Nut18Transport>>,
+    #[serde(rename = "nut10", skip_serializing_if = "Option::is_none")]
+    nut10: Option<Nut18LockOption>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -199,6 +277,23 @@ struct CashuSendResponse {
     token: String,
 }
 
+#[derive(Deserialize, Debug)]
+struct Nut18PaymentPayload {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    _memo: Option<String>,
+    mint: String,
+    unit: String,
+    proofs: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct PaymentAcceptResponse {
+    accepted: bool,
+    amount_sats: u64,
+}
+
 #[derive(Deserialize)]
 struct TokenInspectRequest {
     token: String,
@@ -217,6 +312,8 @@ struct FloatStatusResponse {
     max_ratio: f32,
     onchain: WalletFloatStatusPayload,
     cashu: WalletFloatStatusPayload,
+    total_balance_sats: u64,
+    drift_sats: i64,
 }
 
 #[derive(Serialize)]
@@ -268,6 +365,35 @@ async fn create_deposit(
 
     if req.amount_sats < MIN_DEPOSIT_SATS || req.amount_sats > MAX_DEPOSIT_SATS {
         return Err(invalid_request("amount_sats is outside the allowed range"));
+    }
+
+    let cashu_wallet = state
+        .cashu_wallet
+        .as_ref()
+        .ok_or_else(|| unavailable("cashu wallet not configured"))?;
+    let spendable = {
+        let guard = cashu_wallet.lock().await;
+        guard.total_balance().await.map_err(server_error)?.to_u64()
+    };
+    let ratio = state.single_request_cap_ratio;
+    let deposit_cap = ((spendable as f64) * ratio).floor() as u64;
+    if deposit_cap == 0 {
+        return Err(unavailable(
+            "cashu float is depleted; please contact the operator",
+        ));
+    }
+    if req.amount_sats > deposit_cap {
+        tracing::warn!(
+            target: "backend",
+            requested = req.amount_sats,
+            spendable,
+            deposit_cap,
+            "deposit request exceeds cashu float cap"
+        );
+        return Err(invalid_request(format!(
+            "amount_sats exceeds the current Cashu float cap ({} sats)",
+            deposit_cap
+        )));
     }
 
     let id = format!("dep_{}", Uuid::new_v4());
@@ -322,28 +448,77 @@ async fn get_deposit(State(state): State<AppState>, Path(id): Path<String>) -> A
 
 async fn request_withdrawal(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<WithdrawalRequest>,
 ) -> ApiResult<WithdrawalView> {
-    let token_raw = req.token.trim();
-    if token_raw.is_empty() {
-        return Err(invalid_request("token is required"));
+    if req.amount_sats == 0 {
+        return Err(invalid_request("amount_sats must be greater than zero"));
+    }
+    if req.amount_sats < state.withdrawal_min_sats {
+        return Err(invalid_request(
+            "amount_sats is below the minimum withdrawal limit",
+        ));
     }
     if req.delivery_address.trim().is_empty() {
         return Err(invalid_request("delivery_address is required"));
     }
 
-    let mint_url = token_mint_url(token_raw).map_err(map_token_error)?;
+    let token_raw = req
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if token_raw.is_none() && !req.create_payment_request {
+        return Err(invalid_request(
+            "token is required unless create_payment_request is true",
+        ));
+    }
+    if token_raw.is_some() && req.create_payment_request {
+        return Err(invalid_request(
+            "token and create_payment_request cannot both be provided",
+        ));
+    }
+
+    let available_onchain = match state.onchain_wallet.as_ref() {
+        Some(wallet) => {
+            let summary = wallet.balance().await.map_err(server_error)?;
+            summary.confirmed + summary.trusted_pending
+        }
+        None => return Err(unavailable("on-chain wallet not configured")),
+    };
+    let ratio = state.single_request_cap_ratio;
+    let withdrawal_cap = ((available_onchain as f64) * ratio).floor() as u64;
+    if withdrawal_cap == 0 {
+        return Err(unavailable(
+            "on-chain wallet is depleted; please contact the operator",
+        ));
+    }
+    if req.amount_sats > withdrawal_cap {
+        tracing::warn!(
+            target: "backend",
+            requested = req.amount_sats,
+            available_onchain,
+            withdrawal_cap,
+            "withdrawal request exceeds on-chain float cap"
+        );
+        return Err(invalid_request(format!(
+            "amount_sats exceeds the current on-chain float cap ({} sats)",
+            withdrawal_cap
+        )));
+    }
 
     let id = format!("wd_{}", Uuid::new_v4());
     let now = Utc::now();
 
-    let withdrawal = Withdrawal {
+    let mut withdrawal = Withdrawal {
         id: id.clone(),
         state: WithdrawalState::Queued,
-        delivery_address: req.delivery_address,
+        delivery_address: req.delivery_address.trim().to_string(),
         max_fee_sats: req.max_fee_sats,
+        requested_amount_sats: Some(req.amount_sats),
         token_value_sats: None,
-        token: token_raw.to_string(),
+        token: token_raw.map(ToOwned::to_owned),
         txid: None,
         error: None,
         last_attempt_at: None,
@@ -352,6 +527,56 @@ async fn request_withdrawal(
         updated_at: now,
         token_consumed: false,
         swap_fee_sats: None,
+        payment_request_id: None,
+        payment_request_creq: None,
+        payment_request_expires_at: None,
+        payment_request_fulfilled_at: None,
+    };
+
+    let known_mint = if let Some(token) = &withdrawal.token {
+        let mint_url = token_mint_url(token).map_err(map_token_error)?;
+        let token_amount = token_total_amount(token).map_err(map_token_error)?;
+        if token_amount < req.amount_sats {
+            return Err(invalid_request("token value is below requested amount"));
+        }
+        Some(mint_url)
+    } else {
+        let canonical_mint = match state.cashu_mint_url.as_deref() {
+            Some(mint) => mint.to_string(),
+            None => return Err(unavailable("cashu mint not configured")),
+        };
+        let base_url = match infer_base_url(&headers) {
+            Some(url) => url,
+            None => return Err(invalid_request("missing Host header")),
+        };
+        let payment_request_id = format!("pr_{}", Uuid::new_v4());
+        let transport_target = format!(
+            "{}/api/v1/withdrawals/{}/nut18",
+            base_url.trim_end_matches('/'),
+            id
+        );
+        let expires_at = now + Duration::seconds(PAYMENT_REQUEST_TTL_SECS);
+        let description = format!("Cashu → Bitcoin withdrawal {} sats", req.amount_sats);
+        let request = Nut18PaymentRequest {
+            id: Some(payment_request_id.clone()),
+            amount: Some(req.amount_sats),
+            unit: Some("sat".to_string()),
+            single_use: Some(true),
+            mints: Some(vec![canonical_mint.clone()]),
+            description: Some(description),
+            transports: Some(vec![Nut18Transport {
+                kind: "post".to_string(),
+                target: transport_target,
+                tags: None,
+            }]),
+            nut10: None,
+        };
+        let encoded = encode_payment_request(&request).map_err(server_error)?;
+        withdrawal.state = WithdrawalState::Funding;
+        withdrawal.payment_request_id = Some(payment_request_id);
+        withdrawal.payment_request_creq = Some(encoded);
+        withdrawal.payment_request_expires_at = Some(expires_at);
+        Some(canonical_mint)
     };
 
     state
@@ -361,7 +586,7 @@ async fn request_withdrawal(
         .map_err(server_error)?;
 
     Ok(Json(ApiResponse {
-        data: WithdrawalView::new(withdrawal, state.cashu_mint_url.as_deref(), Some(mint_url)),
+        data: WithdrawalView::new(withdrawal, state.cashu_mint_url.as_deref(), known_mint),
     }))
 }
 
@@ -376,6 +601,250 @@ async fn get_withdrawal(
         Err(sqlx::Error::RowNotFound) => Err(not_found("withdrawal_not_found")),
         Err(err) => Err(server_error(err)),
     }
+}
+
+async fn submit_payment_request(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<Nut18PaymentPayload>,
+) -> ApiResult<PaymentAcceptResponse> {
+    let withdrawal = match state.db.fetch_withdrawal(&id).await {
+        Ok(wd) => wd,
+        Err(sqlx::Error::RowNotFound) => return Err(not_found("withdrawal_not_found")),
+        Err(err) => return Err(server_error(err)),
+    };
+
+    let proofs_len = payload.proofs.len();
+    let string_proofs = payload
+        .proofs
+        .iter()
+        .filter(|value| value.is_string())
+        .count();
+    let proof_shape = payload.proofs.get(0).map(json_kind).unwrap_or("none");
+    let amount_kind = payload
+        .proofs
+        .get(0)
+        .and_then(|proof| proof.get("amount"))
+        .map(json_kind)
+        .unwrap_or("missing");
+    tracing::info!(
+        target: "backend",
+        withdrawal_id = %withdrawal.id,
+        payment_id = ?payload.id,
+        mint = %payload.mint,
+        unit = %payload.unit,
+        proofs = proofs_len,
+        string_proofs,
+        proof_shape,
+        amount_kind,
+        state = %withdrawal.state.as_str(),
+        "received nut18 payment payload"
+    );
+
+    if withdrawal.state != WithdrawalState::Funding {
+        tracing::warn!(
+            target: "backend",
+            withdrawal_id = %withdrawal.id,
+            state = %withdrawal.state.as_str(),
+            "payment request is not accepting funding"
+        );
+        return Err(conflict("withdrawal_not_accepting_payment"));
+    }
+    if withdrawal.payment_request_fulfilled_at.is_some() {
+        tracing::warn!(
+            target: "backend",
+            withdrawal_id = %withdrawal.id,
+            "payment request already fulfilled"
+        );
+        return Err(conflict("payment_request_already_fulfilled"));
+    }
+    if withdrawal.payment_request_id.is_none() || withdrawal.payment_request_creq.is_none() {
+        tracing::error!(
+            target: "backend",
+            withdrawal_id = %withdrawal.id,
+            "payment request metadata missing on withdrawal"
+        );
+        return Err(unavailable("payment_request_not_configured"));
+    }
+    if let Some(expected) = withdrawal.payment_request_id.as_deref() {
+        if payload.id.as_deref() != Some(expected) {
+            tracing::warn!(
+                target: "backend",
+                withdrawal_id = %withdrawal.id,
+                expected_id = %expected,
+                actual_id = ?payload.id,
+                "payment request id mismatch"
+            );
+            return Err(invalid_request("payment_request_id_mismatch"));
+        }
+    }
+    if let Some(expires_at) = withdrawal.payment_request_expires_at {
+        if Utc::now() > expires_at {
+            tracing::warn!(
+                target: "backend",
+                withdrawal_id = %withdrawal.id,
+                expires_at = %expires_at,
+                "payment request expired"
+            );
+            return Err(invalid_request("payment_request_expired"));
+        }
+    }
+    if payload.proofs.is_empty() {
+        tracing::warn!(
+            target: "backend",
+            withdrawal_id = %withdrawal.id,
+            "payment request payload missing proofs"
+        );
+        return Err(invalid_request("proofs must not be empty"));
+    }
+    if payload.unit.to_ascii_lowercase() != "sat" {
+        tracing::warn!(
+            target: "backend",
+            withdrawal_id = %withdrawal.id,
+            unit = %payload.unit,
+            "payment request payload has invalid unit"
+        );
+        return Err(invalid_request("unit must be 'sat'"));
+    }
+    if let Some(expected) = state.cashu_mint_url.as_deref() {
+        let expected_norm = normalize_mint_url(expected);
+        let actual_norm = normalize_mint_url(&payload.mint);
+        if actual_norm != expected_norm {
+            tracing::warn!(
+                target: "backend",
+                withdrawal_id = %withdrawal.id,
+                expected_mint = %expected,
+                actual_mint = %payload.mint,
+                "payment request mint mismatch"
+            );
+            return Err(invalid_request("mint_mismatch"));
+        }
+    }
+
+    let withdrawal_id = withdrawal.id.clone();
+    let normalized_proofs: Vec<serde_json::Value> = payload
+        .proofs
+        .iter()
+        .map(|value| {
+            if let serde_json::Value::String(inner) = value {
+                match serde_json::from_str(inner) {
+                    Ok(parsed) => parsed,
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "backend",
+                            withdrawal_id = %withdrawal_id,
+                            error = %err,
+                            "failed to parse proof string payload"
+                        );
+                        value.clone()
+                    }
+                }
+            } else if let serde_json::Value::Object(mut map) = value.clone() {
+                if let Some(amount_value) = map.get_mut("amount") {
+                    if let serde_json::Value::String(amount_str) = amount_value {
+                        match amount_str.parse::<u64>() {
+                            Ok(parsed) => {
+                                *amount_value = serde_json::Value::Number(parsed.into());
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    target: "backend",
+                                    withdrawal_id = %withdrawal_id,
+                                    error = %err,
+                                    "failed to parse proof amount string"
+                                );
+                            }
+                        }
+                    }
+                }
+                serde_json::Value::Object(map)
+            } else {
+                value.clone()
+            }
+        })
+        .collect();
+
+    let token_json = json!({
+        "token": [{
+            "mint": payload.mint,
+            "unit": payload.unit,
+            "proofs": normalized_proofs,
+        }]
+    });
+    let token_body = serde_json::to_string(&token_json).map_err(server_error)?;
+    if let Err(err) = fs::write("/tmp/nut18-last-token.json", &token_body) {
+        tracing::warn!(
+            target: "backend",
+            withdrawal_id = %withdrawal.id,
+            error = %err,
+            "failed to write debug token snapshot"
+        );
+    }
+    let encoded = format!("cashuA{}", URL_SAFE_NO_PAD.encode(token_body.as_bytes()));
+    let amount = match token_total_amount(&encoded) {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(
+                target: "backend",
+                withdrawal_id = %withdrawal.id,
+                error = %err,
+                "failed to decode payment request token"
+            );
+            return Err(map_token_error(err));
+        }
+    };
+    if let Some(expected) = withdrawal.requested_amount_sats {
+        if amount < expected {
+            tracing::warn!(
+                target: "backend",
+                withdrawal_id = %withdrawal.id,
+                amount_sats = amount,
+                expected_sats = expected,
+                "payment amount below requested amount"
+            );
+            return Err(invalid_request("payment amount below requested amount"));
+        }
+    }
+
+    state
+        .db
+        .record_payment_request_token(&withdrawal.id, &encoded)
+        .await
+        .map_err(|err| match err {
+            sqlx::Error::RowNotFound => {
+                tracing::warn!(
+                    target: "backend",
+                    withdrawal_id = %withdrawal.id,
+                    "payment request row missing when recording token"
+                );
+                conflict("withdrawal_not_accepting_payment")
+            }
+            other => {
+                tracing::error!(
+                    target: "backend",
+                    withdrawal_id = %withdrawal.id,
+                    error = %other,
+                    "failed to record payment request token"
+                );
+                server_error(other)
+            }
+        })?;
+
+    tracing::info!(
+        target: "backend",
+        withdrawal_id = %withdrawal.id,
+        payment_id = ?payload.id,
+        amount_sats = amount,
+        proofs = proofs_len,
+        "payment request accepted"
+    );
+
+    Ok(Json(ApiResponse {
+        data: PaymentAcceptResponse {
+            accepted: true,
+            amount_sats: amount,
+        },
+    }))
 }
 
 async fn get_wallet_balance(
@@ -616,6 +1085,9 @@ async fn get_float_status(
 ) -> ApiResult<FloatStatusResponse> {
     require_operator_token(&state, &headers)?;
     let snapshot = state.float_status.read().await.clone();
+    let total_balance = snapshot.onchain.balance_sats + snapshot.cashu.balance_sats;
+    let drift = state.float_target_sats as i64 - total_balance as i64;
+
     Ok(Json(ApiResponse {
         data: FloatStatusResponse {
             target_sats: state.float_target_sats,
@@ -623,8 +1095,43 @@ async fn get_float_status(
             max_ratio: state.float_max_ratio,
             onchain: WalletFloatStatusPayload::from(&snapshot.onchain),
             cashu: WalletFloatStatusPayload::from(&snapshot.cashu),
+            total_balance_sats: total_balance,
+            drift_sats: drift,
         },
     }))
+}
+
+fn encode_payment_request(request: &Nut18PaymentRequest) -> Result<String, serde_cbor::Error> {
+    let cbor = serde_cbor::to_vec(request)?;
+    Ok(format!("creqA{}", URL_SAFE_NO_PAD.encode(cbor)))
+}
+
+fn normalize_mint_url(value: &str) -> &str {
+    value.trim_end_matches('/')
+}
+
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+fn infer_base_url(headers: &HeaderMap) -> Option<String> {
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(HOST))?
+        .to_str()
+        .ok()?;
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("http");
+    Some(format!("{}://{}", proto, host))
 }
 
 fn wallet_guard(
@@ -727,12 +1234,22 @@ fn map_token_error(err: TokenMintError) -> (StatusCode, Json<ApiError>) {
     }
 }
 
-fn invalid_request(message: &str) -> (StatusCode, Json<ApiError>) {
+fn invalid_request(message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
     (
         StatusCode::BAD_REQUEST,
         Json(ApiError {
             code: "validation_error",
-            message: message.to_string(),
+            message: message.into(),
+        }),
+    )
+}
+
+fn conflict(code: &'static str) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            code,
+            message: "Resource state conflict".into(),
         }),
     )
 }

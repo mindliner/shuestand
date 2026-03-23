@@ -103,21 +103,34 @@ impl Database {
     pub async fn insert_withdrawal(&self, withdrawal: &Withdrawal) -> Result<(), Error> {
         sqlx::query(
             r#"INSERT INTO withdrawals
-            (id, state, delivery_address, max_fee_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+            (id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"#,
         )
         .bind(&withdrawal.id)
         .bind(withdrawal.state.as_str())
         .bind(&withdrawal.delivery_address)
         .bind(withdrawal.max_fee_sats.map(|v| v as i64))
+        .bind(withdrawal.requested_amount_sats.map(|v| v as i64))
         .bind(withdrawal.token_value_sats.map(|v| v as i64))
-        .bind(&withdrawal.token)
+        .bind(withdrawal.token.as_deref())
         .bind(&withdrawal.txid)
         .bind(&withdrawal.error)
         .bind(withdrawal.last_attempt_at.map(|ts| ts.to_rfc3339()))
         .bind(withdrawal.attempt_count as i32)
         .bind(withdrawal.created_at.to_rfc3339())
         .bind(withdrawal.updated_at.to_rfc3339())
+        .bind(&withdrawal.payment_request_id)
+        .bind(&withdrawal.payment_request_creq)
+        .bind(
+            withdrawal
+                .payment_request_expires_at
+                .map(|ts| ts.to_rfc3339()),
+        )
+        .bind(
+            withdrawal
+                .payment_request_fulfilled_at
+                .map(|ts| ts.to_rfc3339()),
+        )
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -125,7 +138,7 @@ impl Database {
 
     pub async fn fetch_withdrawal(&self, id: &str) -> Result<Withdrawal, Error> {
         let row = sqlx::query(
-            r#"SELECT id, state, delivery_address, max_fee_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats
+            r#"SELECT id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at
             FROM withdrawals WHERE id = $1"#,
         )
         .bind(id)
@@ -147,8 +160,10 @@ impl Database {
                 .map_err(|_| Error::Decode(BoxDynError::from("invalid withdrawal state")))?,
             delivery_address: row.try_get("delivery_address")?,
             max_fee_sats: decode_optional_i64(&row, "max_fee_sats")?.map(|v| v as u64),
+            requested_amount_sats: decode_optional_i64(&row, "requested_amount_sats")?
+                .map(|v| v as u64),
             token_value_sats: decode_optional_i64(&row, "token_value_sats")?.map(|v| v as u64),
-            token: row.try_get("token")?,
+            token: decode_optional_string(&row, "token")?,
             txid: decode_optional_string(&row, "txid")?,
             error: decode_optional_string(&row, "error")?,
             last_attempt_at,
@@ -157,6 +172,16 @@ impl Database {
             updated_at,
             token_consumed: row.try_get::<bool, _>("token_consumed")?,
             swap_fee_sats: decode_optional_i64(&row, "swap_fee_sats")?.map(|v| v as u64),
+            payment_request_id: decode_optional_string(&row, "payment_request_id")?,
+            payment_request_creq: decode_optional_string(&row, "payment_request_creq")?,
+            payment_request_expires_at: decode_optional_timestamp(
+                &row,
+                "payment_request_expires_at",
+            )?,
+            payment_request_fulfilled_at: decode_optional_timestamp(
+                &row,
+                "payment_request_fulfilled_at",
+            )?,
         })
     }
 
@@ -173,7 +198,7 @@ impl Database {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            r#"SELECT id, state, delivery_address, max_fee_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats
+            r#"SELECT id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at
             FROM withdrawals WHERE state IN ({})"#,
             placeholders
         );
@@ -240,6 +265,28 @@ impl Database {
         .bind(&now)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    pub async fn record_payment_request_token(&self, id: &str, token: &str) -> Result<(), Error> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"UPDATE withdrawals
+            SET token = $2,
+                state = 'queued',
+                payment_request_fulfilled_at = $3,
+                updated_at = $3
+            WHERE id = $1 AND state = 'funding'"#,
+        )
+        .bind(id)
+        .bind(token)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(sqlx::Error::RowNotFound);
+        }
         Ok(())
     }
 
@@ -591,9 +638,10 @@ pub struct Deposit {
     pub delivery_error: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WithdrawalState {
+    Funding,
     Queued,
     Broadcasting,
     Confirming,
@@ -604,6 +652,7 @@ pub enum WithdrawalState {
 impl WithdrawalState {
     pub fn as_str(&self) -> &'static str {
         match self {
+            WithdrawalState::Funding => "funding",
             WithdrawalState::Queued => "queued",
             WithdrawalState::Broadcasting => "broadcasting",
             WithdrawalState::Confirming => "confirming",
@@ -618,6 +667,7 @@ impl TryFrom<&str> for WithdrawalState {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
+            "funding" => Ok(WithdrawalState::Funding),
             "queued" => Ok(WithdrawalState::Queued),
             "broadcasting" => Ok(WithdrawalState::Broadcasting),
             "confirming" => Ok(WithdrawalState::Confirming),
@@ -634,9 +684,10 @@ pub struct Withdrawal {
     pub state: WithdrawalState,
     pub delivery_address: String,
     pub max_fee_sats: Option<u64>,
+    pub requested_amount_sats: Option<u64>,
     pub token_value_sats: Option<u64>,
     #[serde(skip_serializing)]
-    pub token: String,
+    pub token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub txid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -649,6 +700,14 @@ pub struct Withdrawal {
     pub token_consumed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub swap_fee_sats: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment_request_creq: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment_request_expires_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment_request_fulfilled_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Copy, Debug)]

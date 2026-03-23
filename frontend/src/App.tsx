@@ -1,9 +1,16 @@
 import type { FormEvent } from 'react'
 import { useEffect, useState } from 'react'
+
+const STORAGE_KEYS = {
+  deposit: 'shuestand.latestDepositId',
+  withdrawal: 'shuestand.latestWithdrawalId',
+}
 import { useQuery } from '@tanstack/react-query'
 import './App.css'
 import { config } from './config'
+import { DELIVERY_TARGETS } from './config/deliveryTargets'
 import { detectTokenMint } from './lib/cashu'
+import type { CreateWithdrawalRequest } from './types/api'
 import {
   ApiClientError,
   createDeposit,
@@ -34,8 +41,13 @@ const normalizeError = (err: unknown): Error | null => {
 export default function App() {
   const [view, setView] = useState<ViewMode>('kiosk')
   const [flow, setFlow] = useState<Flow>('deposit')
-  const [amount, setAmount] = useState(DEFAULT_AMOUNT)
-  const [deliveryHint, setDeliveryHint] = useState('cashu://wallet/minibits')
+  const [depositAmount, setDepositAmount] = useState(DEFAULT_AMOUNT)
+  const [withdrawalAmount, setWithdrawalAmount] = useState(DEFAULT_AMOUNT)
+  const [withdrawalMethod, setWithdrawalMethod] = useState<'token' | 'payment_request'>(
+    'token'
+  )
+  const [deliveryTarget, setDeliveryTarget] = useState('manual')
+  const [customDeliveryHint, setCustomDeliveryHint] = useState('')
   const [token, setToken] = useState('')
   const [tokenMintInfo, setTokenMintInfo] = useState<TokenMintInfo | null>(null)
   const [deliveryAddress, setDeliveryAddress] = useState(
@@ -49,10 +61,52 @@ export default function App() {
   )
 
   useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+    const storedDeposit = window.localStorage.getItem(STORAGE_KEYS.deposit)
+    if (storedDeposit) {
+      setLatestDepositId(storedDeposit)
+    }
+    const storedWithdrawal = window.localStorage.getItem(STORAGE_KEYS.withdrawal)
+    if (storedWithdrawal) {
+      setLatestWithdrawalId(storedWithdrawal)
+    }
+  }, [])
+
+  useEffect(() => {
     if (flow !== 'withdrawal') {
       setTokenMintInfo(null)
     }
   }, [flow])
+
+  const rememberDepositId = (id: string) => {
+    setLatestDepositId(id)
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(STORAGE_KEYS.deposit, id)
+    }
+  }
+
+  const rememberWithdrawalId = (id: string) => {
+    setLatestWithdrawalId(id)
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(STORAGE_KEYS.withdrawal, id)
+    }
+  }
+
+  const clearDepositId = () => {
+    setLatestDepositId(null)
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(STORAGE_KEYS.deposit)
+    }
+  }
+
+  const clearWithdrawalId = () => {
+    setLatestWithdrawalId(null)
+    if (typeof window !== 'undefined') {
+      window.localStorage.removeItem(STORAGE_KEYS.withdrawal)
+    }
+  }
 
   const {
     data: latestDeposit,
@@ -99,23 +153,48 @@ export default function App() {
 
     try {
       if (flow === 'deposit') {
+        const selectedTarget = DELIVERY_TARGETS.find((target) => target.id === deliveryTarget)
+        const resolvedHint =
+          deliveryTarget === 'custom'
+            ? customDeliveryHint.trim()
+            : selectedTarget?.hint ?? null
         const payload = {
-          amount_sats: Number(amount),
+          amount_sats: Number(depositAmount),
           metadata: { source: 'ui-proto' },
-          delivery_hint: deliveryHint.trim() || undefined,
+          delivery_hint: resolvedHint || undefined,
         }
         const deposit = await createDeposit(payload)
-        setLatestDepositId(deposit.id)
+        rememberDepositId(deposit.id)
         setMessage(
           `Deposit ${deposit.id} → ${deposit.address} (${deposit.state})`
         )
       } else {
-        const payload = {
-          token: token.trim(),
+        const payload: CreateWithdrawalRequest = {
+          amount_sats: Number(withdrawalAmount),
           delivery_address: deliveryAddress.trim(),
         }
+
+        if (payload.amount_sats <= 0 || Number.isNaN(payload.amount_sats)) {
+          throw new Error('Withdrawal amount must be greater than zero')
+        }
+        if (payload.amount_sats < config.withdrawalMinSats) {
+          throw new Error(
+            `Withdrawal amount must be at least ${config.withdrawalMinSats.toLocaleString()} sats`
+          )
+        }
+
+        if (withdrawalMethod === 'token') {
+          const trimmed = token.trim()
+          if (!trimmed) {
+            throw new Error('Provide a Cashu token or switch to payment requests')
+          }
+          payload.token = trimmed
+        } else {
+          payload.create_payment_request = true
+        }
+
         const withdrawal = await createWithdrawal(payload)
-        setLatestWithdrawalId(withdrawal.id)
+        rememberWithdrawalId(withdrawal.id)
         setMessage(
           `Withdrawal ${withdrawal.id} → ${withdrawal.delivery_address} (${withdrawal.state})`
         )
@@ -192,49 +271,111 @@ export default function App() {
                     <input
                       type="number"
                       min={1}
-                      value={amount}
-                      onChange={(e) => setAmount(e.target.value)}
+                      value={depositAmount}
+                      onChange={(e) => setDepositAmount(e.target.value)}
                       required
                     />
                   </label>
                   <label>
                     Delivery target (optional)
-                    <input
-                      type="text"
-                      value={deliveryHint}
-                      onChange={(e) => setDeliveryHint(e.target.value)}
-                      placeholder="cashu://wallet or numopay order"
-                    />
+                    <select
+                      value={deliveryTarget}
+                      onChange={(e) => setDeliveryTarget(e.target.value)}
+                    >
+                      {DELIVERY_TARGETS.map((target) => (
+                        <option key={target.id} value={target.id}>
+                          {target.label}
+                        </option>
+                      ))}
+                    </select>
                     <span className="helper">
-                      Provide a wallet URL (cashu://, nut://) or an operator label
-                      to auto-push tokens when ready.
+                      {
+                        DELIVERY_TARGETS.find((target) => target.id === deliveryTarget)
+                          ?.description
+                      }
                     </span>
                   </label>
+                  {deliveryTarget === 'custom' && (
+                    <label>
+                      Custom delivery URL
+                      <input
+                        type="text"
+                        value={customDeliveryHint}
+                        onChange={(e) => setCustomDeliveryHint(e.target.value)}
+                        placeholder="cashu://wallet/… or https://webhook"
+                      />
+                    </label>
+                  )}
                 </>
               ) : (
                 <>
                   <label>
-                    Cashu token
-                    <textarea
-                      value={token}
-                      onChange={(e) => handleTokenChange(e.target.value)}
-                      rows={5}
-                      placeholder="Paste ecash token here"
+                    Amount (sats)
+                    <input
+                      type="number"
+                      min={config.withdrawalMinSats}
+                      value={withdrawalAmount}
+                      onChange={(e) => setWithdrawalAmount(e.target.value)}
                       required
                     />
-                    {tokenMintInfo &&
-                      ('error' in tokenMintInfo ? (
-                        <span className="helper warning">{tokenMintInfo.error}</span>
-                      ) : (
-                        <span
-                          className={`helper ${tokenMintInfo.isForeign ? 'warning' : 'success'}`}
-                        >
-                          {tokenMintInfo.isForeign
-                            ? `Foreign token detected (${tokenMintInfo.mintUrl}); will be swapped to the Shuestand mint first.`
-                            : `Mint detected: ${tokenMintInfo.mintUrl}`}
-                        </span>
-                      ))}
+                    <span className="helper">
+                      Minimum {config.withdrawalMinSats.toLocaleString()} sats
+                    </span>
                   </label>
+                  <div className="method-toggle">
+                    <span>Submission method</span>
+                    <div className="method-options">
+                      <label>
+                        <input
+                          type="radio"
+                          name="withdrawal-method"
+                          value="token"
+                          checked={withdrawalMethod === 'token'}
+                          onChange={() => setWithdrawalMethod('token')}
+                        />
+                        Paste token
+                      </label>
+                      <label>
+                        <input
+                          type="radio"
+                          name="withdrawal-method"
+                          value="payment_request"
+                          checked={withdrawalMethod === 'payment_request'}
+                          onChange={() => setWithdrawalMethod('payment_request')}
+                        />
+                        Cashu payment request
+                      </label>
+                    </div>
+                  </div>
+                  {withdrawalMethod === 'token' ? (
+                    <label>
+                      Cashu token
+                      <textarea
+                        value={token}
+                        onChange={(e) => handleTokenChange(e.target.value)}
+                        rows={5}
+                        placeholder="Paste ecash token here"
+                        required={withdrawalMethod === 'token'}
+                      />
+                      {tokenMintInfo &&
+                        ('error' in tokenMintInfo ? (
+                          <span className="helper warning">{tokenMintInfo.error}</span>
+                        ) : (
+                          <span
+                            className={`helper ${tokenMintInfo.isForeign ? 'warning' : 'success'}`}
+                          >
+                            {tokenMintInfo.isForeign
+                              ? `Foreign token detected (${tokenMintInfo.mintUrl}); will be swapped to the Shuestand mint first.`
+                              : `Mint detected: ${tokenMintInfo.mintUrl}`}
+                          </span>
+                        ))}
+                    </label>
+                  ) : (
+                    <div className="helper">
+                      We'll create a NUT-18 Cashu payment request so you can scan a QR code
+                      instead of pasting a token.
+                    </div>
+                  )}
                   <label>
                     Bitcoin address
                     <input
@@ -263,19 +404,41 @@ export default function App() {
               </p>
 
               {flow === 'deposit' ? (
-                <DepositStatusCard
-                  deposit={latestDeposit}
-                  error={normalizeError(depositError)}
-                  isLoading={depositLoading}
-                  hasSubmission={Boolean(latestDepositId)}
-                />
+                <>
+                  <DepositStatusCard
+                    deposit={latestDeposit}
+                    error={normalizeError(depositError)}
+                    isLoading={depositLoading}
+                    hasSubmission={Boolean(latestDepositId)}
+                  />
+                  {latestDepositId && (
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={clearDepositId}
+                    >
+                      Forget this deposit
+                    </button>
+                  )}
+                </>
               ) : (
-                <WithdrawalStatusCard
-                  withdrawal={latestWithdrawal}
-                  error={normalizeError(withdrawalError)}
-                  isLoading={withdrawalLoading}
-                  hasSubmission={Boolean(latestWithdrawalId)}
-                />
+                <>
+                  <WithdrawalStatusCard
+                    withdrawal={latestWithdrawal}
+                    error={normalizeError(withdrawalError)}
+                    isLoading={withdrawalLoading}
+                    hasSubmission={Boolean(latestWithdrawalId)}
+                  />
+                  {latestWithdrawalId && (
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={clearWithdrawalId}
+                    >
+                      Forget this withdrawal
+                    </button>
+                  )}
+                </>
               )}
             </aside>
           </>

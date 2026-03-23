@@ -125,6 +125,15 @@ export function WithdrawalStatusCard({
     )
   }
 
+  const paymentRequest = withdrawal.payment_request ?? null
+  const paymentExpiresAt = paymentRequest?.expires_at
+    ? new Date(paymentRequest.expires_at)
+    : null
+  const paymentFulfilledAt = paymentRequest?.fulfilled_at
+    ? new Date(paymentRequest.fulfilled_at)
+    : null
+  const isAwaitingPayment = withdrawal.state === 'funding' && Boolean(paymentRequest)
+
   return (
     <div className="status-block">
       <h3>Withdrawal progress</h3>
@@ -148,12 +157,46 @@ export function WithdrawalStatusCard({
           Swap fee: {withdrawal.swap_fee_sats} sats (kept by swap/melt)
         </p>
       )}
+      {typeof withdrawal.requested_amount_sats === 'number' && withdrawal.requested_amount_sats > 0 && (
+        <p className="status-meta">Requested: {withdrawal.requested_amount_sats} sats</p>
+      )}
+      {typeof withdrawal.token_value_sats === 'number' && withdrawal.token_value_sats > 0 && (
+        <p className="status-meta">Redeemed: {withdrawal.token_value_sats} sats</p>
+      )}
       {withdrawal.txid && (
         <>
           <p className="status-meta code">tx: {withdrawal.txid}</p>
           <CopyButton label="Copy txid" text={withdrawal.txid} />
         </>
       )}
+
+      {isAwaitingPayment && paymentRequest && (
+        <div className="status-block nested">
+          <p>Scan this Cashu payment request to fund the withdrawal.</p>
+          <div className="qr-card">
+            <QRCodeSVG value={paymentRequest.creq} size={132} />
+            <CopyButton label="Copy payment request" text={paymentRequest.creq} />
+          </div>
+          {paymentExpiresAt && (
+            <p className="status-meta">
+              Expires at {paymentExpiresAt.toLocaleTimeString()} ({
+                Math.max(
+                  0,
+                  Math.floor((paymentExpiresAt.getTime() - Date.now()) / 1000)
+                )
+              }{' '}
+              s left)
+            </p>
+          )}
+        </div>
+      )}
+
+      {!isAwaitingPayment && paymentRequest && paymentFulfilledAt && (
+        <p className="status-meta success">
+          Payment received at {paymentFulfilledAt.toLocaleTimeString()}
+        </p>
+      )}
+
       <StatusTimeline stages={WITHDRAWAL_STAGES} current={withdrawal.state} />
     </div>
   )
@@ -220,6 +263,7 @@ const DEPOSIT_STAGES: Stage<DepositState>[] = [
 ]
 
 const WITHDRAWAL_STAGES: Stage<WithdrawalState>[] = [
+  { key: 'funding', label: 'Awaiting ecash', helper: 'Scan the payment request' },
   { key: 'queued', label: 'Queued', helper: 'Waiting for worker' },
   { key: 'broadcasting', label: 'Redeeming + broadcasting' },
   { key: 'confirming', label: 'Awaiting confirmations' },

@@ -204,7 +204,11 @@ impl WithdrawalExecutor for CashuRedeemingExecutor {
                 .token_value_sats
                 .ok_or_else(|| anyhow!("withdrawal marked consumed without amount"))?
         } else {
-            let redeemed = self.redeemer.redeem(&withdrawal.token).await?;
+            let token = withdrawal
+                .token
+                .as_deref()
+                .ok_or_else(|| anyhow!("withdrawal missing token payload"))?;
+            let redeemed = self.redeemer.redeem(token).await?;
             self.db
                 .record_token_consumed(&withdrawal.id, redeemed.amount_sats, redeemed.swap_fee_sats)
                 .await?;
@@ -250,7 +254,11 @@ impl WithdrawalExecutor for CashuToOnchainExecutor {
                 .token_value_sats
                 .ok_or_else(|| anyhow!("withdrawal marked consumed without amount"))?
         } else {
-            let redeemed = self.redeemer.redeem(&withdrawal.token).await?;
+            let token = withdrawal
+                .token
+                .as_deref()
+                .ok_or_else(|| anyhow!("withdrawal missing token payload"))?;
+            let redeemed = self.redeemer.redeem(token).await?;
             self.db
                 .record_token_consumed(&withdrawal.id, redeemed.amount_sats, redeemed.swap_fee_sats)
                 .await?;
@@ -279,9 +287,13 @@ pub struct MockWithdrawalExecutor;
 #[async_trait]
 impl WithdrawalExecutor for MockWithdrawalExecutor {
     async fn execute(&self, withdrawal: &Withdrawal) -> Result<WithdrawalOutcome, anyhow::Error> {
-        let inferred_amount = withdrawal
-            .token_value_sats
-            .unwrap_or_else(|| (withdrawal.token.len() as u64).max(100));
+        let inferred_amount = withdrawal.token_value_sats.unwrap_or_else(|| {
+            withdrawal
+                .token
+                .as_ref()
+                .map(|token| (token.len() as u64).max(100))
+                .unwrap_or(100)
+        });
         Ok(WithdrawalOutcome {
             next_state: WithdrawalState::Confirming,
             token_value_sats: Some(inferred_amount),

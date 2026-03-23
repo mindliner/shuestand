@@ -30,6 +30,7 @@ Shuestand lets users fund a Cashu wallet from on-chain Bitcoin or withdraw sats 
   - REST + WebSocket endpoints for session orchestration.
   - Stateless auth tokens per kiosk/session plus optional operator login.
   - Structured logging + OpenTelemetry spans.
+  - Binds to `0.0.0.0:8080` by default; set `SHUESTAND_BACKEND_PORT` to override.
 - **Ledger / DB** (SQLite for dev, Postgres in prod): tracks deposits, redemptions, float exposure (on-chain, LN, Cashu liabilities), and audit signatures.
 - **Bitcoin subsystem**: bitcoind/electrs client, address manager, confirmation oracle, rebroadcaster, fee estimator.
 - **Lightning adaptor**: LND/CLN wrapper for invoice creation, payment, keysend; auto-balancing policies for `Open_Hand` channels.
@@ -77,6 +78,11 @@ The backend now embeds the CDK wallet to redeem incoming Cashu tokens inside the
 | `CASHU_WALLET_DIR` | Optional override for the CDK wallet/seed location. Defaults to `~/.shuestand/cashu`. |
 
 On startup the service (1) derives/loads a 64-byte seed under `CASHU_WALLET_DIR`, (2) opens `wallet.sqlite` via `cdk-sqlite`, (3) replays incomplete redemption sagas, and (4) hands the wallet to the withdrawal worker. Each redemption logs the amount, updates `withdrawals.token_value_sats`, and either advances to `broadcasting` or retries until the attempt budget is exhausted. See `backend/.env.mainnet.example` for a production-ready env stencil you can copy and fill with real descriptors/credentials.
+
+### Cross-mint swaps
+- Foreign Cashu tokens are now imported into per-mint CDK wallets, melted via Lightning to the kiosk mint, and the resulting proofs are minted before we touch the on-chain payout.
+- The swapper fetches the melt quote upfront, checks `invoice + fee_reserve + input_fee` against the wallet’s spendable proofs, and shrinks the invoice before any proofs are reserved so we don't burn float chasing an impossible payment.
+- `MintQuoteState::Paid` is treated as success, so as soon as CLN marks the kiosk invoice paid we pull the canonical proofs and move the withdrawal to the on-chain stage.
 
 ## Roadmap (Draft)
 1. **Spec & scaffolding** (Week 1)
