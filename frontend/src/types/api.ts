@@ -6,6 +6,7 @@ export type DepositState =
   | 'ready'
   | 'fulfilled'
   | 'failed'
+  | 'archived_by_operator'
 
 export interface Deposit {
   id: string
@@ -21,6 +22,9 @@ export interface Deposit {
   last_event?: string | null
   token?: string | null
   token_qr?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+  delivery_error?: string | null
 }
 
 export type WithdrawalState =
@@ -57,6 +61,22 @@ export interface Withdrawal {
   updated_at?: string | null
 }
 
+export interface OperatorWithdrawalListParams {
+  states?: WithdrawalState[]
+  limit?: number
+}
+
+export interface OperatorWithdrawalActionRequest {
+  action: 'mark_settled' | 'mark_failed' | 'requeue' | 'archive'
+  note?: string
+  txid?: string
+}
+
+export interface OperatorDepositActionRequest {
+  action: 'mark_fulfilled' | 'mark_failed' | 'archive'
+  note?: string
+}
+
 export interface ApiResponse<T> {
   data: T
 }
@@ -70,6 +90,15 @@ export interface CreateDepositRequest {
   amount_sats: number
   delivery_hint?: string
   metadata?: Record<string, unknown>
+}
+
+export interface DepositCreationResponse {
+  deposit: Deposit
+  pickup_token: string
+}
+
+export interface DepositPickupResponse {
+  token: string
 }
 
 export interface CreateWithdrawalRequest {
@@ -156,4 +185,65 @@ export interface FloatStatusResponse {
   cashu: WalletFloatStatus
   total_balance_sats?: number
   drift_sats?: number
+}
+
+export interface LedgerSnapshotResponse {
+  captured_at: string
+  float_target_sats: number
+  cashu: CashuLedgerResponse
+  onchain: OnchainLedgerResponse
+  totals: LedgerTotals
+}
+
+export interface LedgerTotals {
+  assets_sats: number
+  liabilities_sats: number
+  net_sats: number
+}
+
+export interface CashuLedgerResponse {
+  assets: CashuAssetBreakdown
+  liabilities: CashuLiabilityBreakdown
+  net_sats: number
+}
+
+export interface CashuAssetBreakdown {
+  spendable: number
+  pending: number
+  reserved: number
+  available_sats: number
+}
+
+export interface LiabilityBucket {
+  amount_sats: number
+  count: number
+}
+
+export interface CashuLiabilityBreakdown {
+  awaiting_confirmations: LiabilityBucket
+  minting: LiabilityBucket
+  ready: LiabilityBucket
+  total_sats: number
+}
+
+export interface OnchainLedgerResponse {
+  assets: OnchainAssetBreakdown
+  liabilities: OnchainLiabilityBreakdown
+  net_sats: number
+}
+
+export interface OnchainAssetBreakdown {
+  confirmed: number
+  trusted_pending: number
+  untrusted_pending: number
+  immature: number
+  available_sats: number
+}
+
+export interface OnchainLiabilityBreakdown {
+  funding: LiabilityBucket
+  queued: LiabilityBucket
+  broadcasting: LiabilityBucket
+  confirming: LiabilityBucket
+  total_sats: number
 }

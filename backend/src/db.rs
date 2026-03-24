@@ -8,7 +8,7 @@ use sqlx::{
     postgres::{PgPoolOptions, PgRow},
 };
 
-const DEPOSIT_SELECT_FIELDS: &str = "id, amount_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, minted_token, minted_amount_sats, token_ready_at, mint_attempt_count, last_mint_attempt_at, mint_error, delivery_attempt_count, last_delivery_attempt_at, delivery_error";
+const DEPOSIT_SELECT_FIELDS: &str = "id, amount_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, minted_token, minted_amount_sats, token_ready_at, mint_attempt_count, last_mint_attempt_at, mint_error, delivery_attempt_count, last_delivery_attempt_at, delivery_error, pickup_token, pickup_revealed_at";
 
 #[derive(Clone)]
 pub struct Database {
@@ -25,8 +25,8 @@ impl Database {
     pub async fn insert_deposit(&self, deposit: &Deposit) -> Result<(), Error> {
         sqlx::query(
             r#"INSERT INTO deposits
-            (id, amount_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+            (id, amount_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, pickup_token, pickup_revealed_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
         )
         .bind(&deposit.id)
         .bind(deposit.amount_sats as i64)
@@ -40,6 +40,8 @@ impl Database {
         .bind(deposit.last_checked_at.map(|ts| ts.to_rfc3339()))
         .bind(deposit.created_at.to_rfc3339())
         .bind(deposit.updated_at.to_rfc3339())
+        .bind(&deposit.pickup_token)
+        .bind(deposit.pickup_revealed_at.map(|ts| ts.to_rfc3339()))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -64,6 +66,7 @@ impl Database {
         let token_ready_at = decode_optional_timestamp(&row, "token_ready_at")?;
         let last_mint_attempt_at = decode_optional_timestamp(&row, "last_mint_attempt_at")?;
         let last_delivery_attempt_at = decode_optional_timestamp(&row, "last_delivery_attempt_at")?;
+        let pickup_revealed_at = decode_optional_timestamp(&row, "pickup_revealed_at")?;
 
         let parsed_state = DepositState::try_from(state.as_str())
             .map_err(|_| Error::Decode(BoxDynError::from("invalid deposit state")))?;
@@ -85,8 +88,10 @@ impl Database {
             created_at,
             updated_at,
             minted_token: minted_token.clone(),
+            pickup_token: row.try_get("pickup_token")?,
+            pickup_revealed_at,
             token: match parsed_state {
-                DepositState::Ready | DepositState::Fulfilled => minted_token,
+                DepositState::Fulfilled => minted_token,
                 _ => None,
             },
             minted_amount_sats: decode_optional_i64(&row, "minted_amount_sats")?.map(|v| v as u64),
@@ -199,7 +204,7 @@ impl Database {
             .join(", ");
         let sql = format!(
             r#"SELECT id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at
-            FROM withdrawals WHERE state IN ({})"#,
+            FROM withdrawals WHERE state IN ({}) ORDER BY created_at ASC"#,
             placeholders
         );
 
@@ -210,6 +215,40 @@ impl Database {
 
         let rows = query.fetch_all(&self.pool).await?;
         rows.into_iter().map(Self::map_withdrawal).collect()
+    }
+
+    pub async fn manual_update_withdrawal_state(
+        &self,
+        id: &str,
+        next_state: WithdrawalState,
+        txid: Option<String>,
+        error: Option<String>,
+        reset_attempts: bool,
+    ) -> Result<(), Error> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"UPDATE withdrawals
+            SET state = $2,
+                txid = $3,
+                error = $4,
+                last_attempt_at = $5,
+                updated_at = $5,
+                attempt_count = CASE WHEN $6 THEN 0 ELSE attempt_count END
+            WHERE id = $1"#,
+        )
+        .bind(id)
+        .bind(next_state.as_str())
+        .bind(txid.as_deref())
+        .bind(error.as_deref())
+        .bind(&now)
+        .bind(reset_attempts)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+        Ok(())
     }
 
     pub async fn record_withdrawal_attempt(
@@ -453,6 +492,44 @@ impl Database {
         rows.into_iter().map(Self::map_deposit).collect()
     }
 
+    pub async fn manual_update_deposit_state(
+        &self,
+        id: &str,
+        next_state: DepositState,
+        note: Option<String>,
+        clear_errors: bool,
+    ) -> Result<(), Error> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"UPDATE deposits
+            SET state = $2,
+                updated_at = $3,
+                delivery_error = CASE
+                    WHEN $5 THEN NULL
+                    WHEN $4 IS NOT NULL THEN $4
+                    ELSE delivery_error
+                END,
+                mint_error = CASE
+                    WHEN $5 THEN NULL
+                    WHEN $4 IS NOT NULL THEN $4
+                    ELSE mint_error
+                END
+            WHERE id = $1"#,
+        )
+        .bind(id)
+        .bind(next_state.as_str())
+        .bind(&now)
+        .bind(note.as_deref())
+        .bind(clear_errors)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+        Ok(())
+    }
+
     pub async fn record_mint_success(
         &self,
         deposit_id: &str,
@@ -555,6 +632,66 @@ impl Database {
         .await?;
         Ok(())
     }
+
+    pub async fn record_pickup_success(&self, deposit_id: &str) -> Result<(), Error> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"UPDATE deposits
+            SET state = $2,
+                pickup_revealed_at = $3,
+                updated_at = $3
+            WHERE id = $1"#,
+        )
+        .bind(deposit_id)
+        .bind(DepositState::Fulfilled.as_str())
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn ledger_deposit_liabilities(&self) -> Result<Vec<StateLiabilityRow>, Error> {
+        let rows = sqlx::query(
+            r#"SELECT state, deposit_count, total_sats FROM ledger_deposit_liabilities"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(StateLiabilityRow {
+                    state: row.try_get("state")?,
+                    count: row.try_get::<i64, _>("deposit_count")? as u64,
+                    amount_sats: row.try_get::<i64, _>("total_sats")? as u64,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn ledger_withdrawal_liabilities(&self) -> Result<Vec<StateLiabilityRow>, Error> {
+        let rows = sqlx::query(
+            r#"SELECT state, withdrawal_count, total_sats FROM ledger_withdrawal_liabilities"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(StateLiabilityRow {
+                    state: row.try_get("state")?,
+                    count: row.try_get::<i64, _>("withdrawal_count")? as u64,
+                    amount_sats: row.try_get::<i64, _>("total_sats")? as u64,
+                })
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StateLiabilityRow {
+    pub state: String,
+    pub count: u64,
+    pub amount_sats: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -567,6 +704,7 @@ pub enum DepositState {
     Ready,
     Fulfilled,
     Failed,
+    ArchivedByOperator,
 }
 
 impl DepositState {
@@ -579,6 +717,7 @@ impl DepositState {
             DepositState::Ready => "ready",
             DepositState::Fulfilled => "fulfilled",
             DepositState::Failed => "failed",
+            DepositState::ArchivedByOperator => "archived_by_operator",
         }
     }
 }
@@ -595,6 +734,7 @@ impl TryFrom<&str> for DepositState {
             "ready" => Ok(DepositState::Ready),
             "fulfilled" => Ok(DepositState::Fulfilled),
             "failed" => Ok(DepositState::Failed),
+            "archived_by_operator" => Ok(DepositState::ArchivedByOperator),
             _ => Err("unknown deposit state"),
         }
     }
@@ -618,6 +758,10 @@ pub struct Deposit {
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing)]
     pub minted_token: Option<String>,
+    #[serde(skip_serializing)]
+    pub pickup_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pickup_revealed_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -647,6 +791,7 @@ pub enum WithdrawalState {
     Confirming,
     Settled,
     Failed,
+    ArchivedByOperator,
 }
 
 impl WithdrawalState {
@@ -658,6 +803,7 @@ impl WithdrawalState {
             WithdrawalState::Confirming => "confirming",
             WithdrawalState::Settled => "settled",
             WithdrawalState::Failed => "failed",
+            WithdrawalState::ArchivedByOperator => "archived_by_operator",
         }
     }
 }
@@ -673,6 +819,7 @@ impl TryFrom<&str> for WithdrawalState {
             "confirming" => Ok(WithdrawalState::Confirming),
             "settled" => Ok(WithdrawalState::Settled),
             "failed" => Ok(WithdrawalState::Failed),
+            "archived_by_operator" => Ok(WithdrawalState::ArchivedByOperator),
             _ => Err("unknown withdrawal state"),
         }
     }

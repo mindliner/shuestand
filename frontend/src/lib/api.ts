@@ -5,6 +5,8 @@ import type {
   CreateDepositRequest,
   CreateWithdrawalRequest,
   Deposit,
+  DepositCreationResponse,
+  DepositPickupResponse,
   WalletBalanceResponse,
   WalletSendRequest,
   WalletSendResponse,
@@ -16,7 +18,11 @@ import type {
   CashuSendRequest,
   CashuSendResponse,
   FloatStatusResponse,
+  LedgerSnapshotResponse,
   Withdrawal,
+  OperatorWithdrawalActionRequest,
+  OperatorWithdrawalListParams,
+  OperatorDepositActionRequest,
 } from '../types/api'
 
 const JSON_HEADERS = {
@@ -93,8 +99,8 @@ function normalizeApiError(payload: unknown): ApiError | undefined {
   return undefined
 }
 
-export function createDeposit(payload: CreateDepositRequest): Promise<Deposit> {
-  return request<Deposit>('/api/v1/deposits', {
+export function createDeposit(payload: CreateDepositRequest): Promise<DepositCreationResponse> {
+  return request<DepositCreationResponse>('/api/v1/deposits', {
     method: 'POST',
     headers: JSON_HEADERS,
     body: JSON.stringify(payload),
@@ -113,6 +119,17 @@ export function createWithdrawal(
 
 export function getDeposit(id: string): Promise<Deposit> {
   return request<Deposit>(`/api/v1/deposits/${encodeURIComponent(id)}`)
+}
+
+export function pickupDeposit(
+  id: string,
+  pickupToken: string,
+): Promise<DepositPickupResponse> {
+  return request<DepositPickupResponse>(`/api/v1/deposits/${encodeURIComponent(id)}/pickup`, {
+    method: 'POST',
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ pickup_token: pickupToken }),
+  })
 }
 
 export function getWithdrawal(id: string): Promise<Withdrawal> {
@@ -198,8 +215,78 @@ export function sendCashuToken(
   })
 }
 
+export function getLedgerSnapshot(token: string): Promise<LedgerSnapshotResponse> {
+  return request<LedgerSnapshotResponse>('/api/v1/operator/ledger', {
+    headers: jsonHeaders(token),
+  })
+}
+
 export function getFloatStatus(token: string): Promise<FloatStatusResponse> {
   return request<FloatStatusResponse>('/api/v1/float/status', {
     headers: jsonHeaders(token),
+  })
+}
+
+
+export function listOperatorWithdrawals(
+  token: string,
+  params?: OperatorWithdrawalListParams,
+): Promise<Withdrawal[]> {
+  const search = new URLSearchParams()
+  params?.states?.forEach((state) => {
+    search.append('state', state)
+  })
+  if (typeof params?.limit === 'number') {
+    search.set('limit', String(params.limit))
+  }
+  const qs = search.toString()
+  const suffix = qs ? `?${qs}` : ''
+  return request<Withdrawal[]>(`/api/v1/operator/withdrawals${suffix}`, {
+    headers: jsonHeaders(token),
+  })
+}
+
+export function operateWithdrawal(
+  token: string,
+  id: string,
+  payload: OperatorWithdrawalActionRequest,
+): Promise<Withdrawal> {
+  return request<Withdrawal>(
+    `/api/v1/operator/withdrawals/${encodeURIComponent(id)}/actions`,
+    {
+      method: 'POST',
+      headers: jsonHeaders(token),
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
+export function listOperatorDeposits(
+  token: string,
+  params?: OperatorWithdrawalListParams,
+): Promise<Deposit[]> {
+  const search = new URLSearchParams()
+  params?.states?.forEach((state) => {
+    search.append('state', state)
+  })
+  if (typeof params?.limit === 'number') {
+    search.set('limit', String(params.limit))
+  }
+  const qs = search.toString()
+  const suffix = qs ? `?${qs}` : ''
+  return request<Deposit[]>(`/api/v1/operator/deposits${suffix}`, {
+    headers: jsonHeaders(token),
+  })
+}
+
+export function operateDeposit(
+  token: string,
+  id: string,
+  payload: OperatorDepositActionRequest,
+): Promise<Deposit> {
+  return request<Deposit>(`/api/v1/operator/deposits/${encodeURIComponent(id)}/actions`, {
+    method: 'POST',
+    headers: jsonHeaders(token),
+    body: JSON.stringify(payload),
   })
 }

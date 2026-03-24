@@ -442,6 +442,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 sender,
                 config.deposit_worker_interval,
                 config.deposit_worker_max_attempts,
+                Client::new(),
             );
             tokio::spawn(async move {
                 worker.run().await;

@@ -5,6 +5,7 @@ import {
   createCashuInvoice,
   getCashuInvoice,
   getCashuWalletBalance,
+  getLedgerSnapshot,
   getWalletBalance,
   getWalletTopup,
   getFloatStatus,
@@ -12,9 +13,13 @@ import {
   sendCashuToken,
   sendWalletPayment,
   syncWallet,
+  listOperatorWithdrawals,
+  operateWithdrawal,
+  listOperatorDeposits,
+  operateDeposit,
 } from '../lib/api'
 import { CopyButton } from './KioskStatusCards'
-import type { FloatStatusResponse } from '../types/api'
+import type { FloatStatusResponse, OperatorWithdrawalActionRequest, OperatorDepositActionRequest, Withdrawal, Deposit } from '../types/api'
 
 const formatTokenSnippet = (token: string) => {
   if (token.length <= 120) {
@@ -24,6 +29,17 @@ const formatTokenSnippet = (token: string) => {
 }
 
 const formatSats = (value: number) => value.toLocaleString('en-US')
+
+const formatSigned = (value: number) => {
+  const prefix = value >= 0 ? '+' : '−'
+  return `${prefix}${formatSats(Math.abs(value))}`
+}
+
+const netClassName = (value: number) => {
+  if (value < 0) return 'status-meta warning'
+  if (value === 0) return 'status-meta'
+  return 'status-meta success'
+}
 
 const renderFloatBadge = (status?: FloatStatusResponse['onchain']) => {
   if (!status) {
@@ -61,6 +77,9 @@ const renderFloatMessage = (
 
 const TOKEN_STORAGE_KEY = 'shuestand.operatorToken'
 
+type CleanupAction = OperatorWithdrawalActionRequest['action']
+type DepositCleanupAction = OperatorDepositActionRequest['action']
+
 export function OperatorPanel() {
   const storedToken =
     typeof window !== 'undefined'
@@ -82,6 +101,11 @@ export function OperatorPanel() {
   const [activeQuoteId, setActiveQuoteId] = useState<string | null>(null)
   const [cashuPayoutAmount, setCashuPayoutAmount] = useState('')
   const [cashuTokenOutput, setCashuTokenOutput] = useState<string | null>(null)
+
+  const [cleanupNotes, setCleanupNotes] = useState<Record<string, string>>({})
+  const [cleanupTxids, setCleanupTxids] = useState<Record<string, string>>({})
+
+  const [depositNotes, setDepositNotes] = useState<Record<string, string>>({})
 
   const queryClient = useQueryClient()
 
@@ -172,11 +196,80 @@ export function OperatorPanel() {
     },
   })
 
+  const cleanupMutation = useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: OperatorWithdrawalActionRequest }) =>
+      operateWithdrawal(token, id, payload),
+    onSuccess: (_, variables) => {
+      setFeedback('Updated withdrawal state')
+      setCleanupNotes((prev) => {
+        if (variables.payload.action !== 'mark_failed') {
+          return prev
+        }
+        const next = { ...prev }
+        delete next[variables.id]
+        return next
+      })
+      setCleanupTxids((prev) => {
+        if (variables.payload.action !== 'mark_settled') {
+          return prev
+        }
+        const next = { ...prev }
+        delete next[variables.id]
+        return next
+      })
+      queryClient.invalidateQueries({ queryKey: ['operator-withdrawals', token] })
+      queryClient.invalidateQueries({ queryKey: ['ledger', token] })
+    },
+    onError: (err: unknown) => {
+      setFeedback(err instanceof Error ? err.message : 'Cleanup action failed')
+    },
+  })
+
+  const depositCleanupMutation = useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: OperatorDepositActionRequest }) =>
+      operateDeposit(token, id, payload),
+    onSuccess: (_, variables) => {
+      if (variables.payload.action === 'mark_failed') {
+        setDepositNotes((prev) => {
+          const next = { ...prev }
+          delete next[variables.id]
+          return next
+        })
+      }
+      queryClient.invalidateQueries({ queryKey: ['operator-deposits', token] })
+      queryClient.invalidateQueries({ queryKey: ['ledger', token] })
+    },
+    onError: (err: unknown) => {
+      setFeedback(err instanceof Error ? err.message : 'Deposit cleanup failed')
+    },
+  })
+
   const floatStatusQuery = useQuery({
     queryKey: ['float-status', token],
     queryFn: () => getFloatStatus(token),
     enabled: Boolean(token),
     refetchInterval: token ? 10000 : false,
+  })
+
+  const ledgerQuery = useQuery({
+    queryKey: ['ledger', token],
+    queryFn: () => getLedgerSnapshot(token),
+    enabled: Boolean(token),
+    refetchInterval: token ? 15000 : false,
+  })
+
+  const cleanupQuery = useQuery({
+    queryKey: ['operator-withdrawals', token],
+    queryFn: () => listOperatorWithdrawals(token),
+    enabled: Boolean(token),
+    refetchInterval: token ? 20000 : false,
+  })
+
+  const depositCleanupQuery = useQuery({
+    queryKey: ['operator-deposits', token],
+    queryFn: () => listOperatorDeposits(token),
+    enabled: Boolean(token),
+    refetchInterval: token ? 20000 : false,
   })
 
   const floatStatus = floatStatusQuery.data
@@ -186,6 +279,8 @@ export function OperatorPanel() {
         upper: Math.round(floatStatus.target_sats * floatStatus.max_ratio),
       }
     : undefined
+  const ledgerSnapshot = ledgerQuery.data
+  const ledgerCapturedAt = ledgerSnapshot ? new Date(ledgerSnapshot.captured_at) : null
 
   const handleSaveToken = () => {
     const trimmed = tokenInput.trim()
@@ -207,6 +302,78 @@ export function OperatorPanel() {
     Number(payoutForm.feeRate) > 0
 
   const canSendCashu = Boolean(token) && Number(cashuPayoutAmount) > 0
+
+  const cleanupItems = cleanupQuery.data ?? []
+
+  const handleCleanupNoteChange = (id: string, value: string) => {
+    setCleanupNotes((prev) => {
+      if (!value) {
+        if (!prev[id]) return prev
+        const next = { ...prev }
+        delete next[id]
+        return next
+      }
+      return { ...prev, [id]: value }
+    })
+  }
+
+  const handleCleanupTxidChange = (id: string, value: string) => {
+    setCleanupTxids((prev) => {
+      if (!value) {
+        if (!prev[id]) return prev
+        const next = { ...prev }
+        delete next[id]
+        return next
+      }
+      return { ...prev, [id]: value }
+    })
+  }
+
+  const handleCleanupAction = (withdrawal: Withdrawal, action: CleanupAction) => {
+    if (!token) return
+    const payload: OperatorWithdrawalActionRequest = { action }
+    if (action === 'mark_failed') {
+      const note = (cleanupNotes[withdrawal.id] ?? '').trim()
+      if (note) {
+        payload.note = note
+      }
+    }
+    if (action === 'mark_settled') {
+      const entered = (cleanupTxids[withdrawal.id] ?? '').trim()
+      const fallback = withdrawal.txid ?? ''
+      const txidValue = entered || fallback
+      if (txidValue) {
+        payload.txid = txidValue
+      }
+    }
+    cleanupMutation.mutate({ id: withdrawal.id, payload })
+  }
+
+  const depositItems = depositCleanupQuery.data ?? []
+
+  const handleDepositNoteChange = (id: string, value: string) => {
+    setDepositNotes((prev) => {
+      if (!value) {
+        if (!prev[id]) return prev
+        const next = { ...prev }
+        delete next[id]
+        return next
+      }
+      return { ...prev, [id]: value }
+    })
+  }
+
+  const handleDepositAction = (deposit: Deposit, action: DepositCleanupAction) => {
+    if (!token) return
+    const payload: OperatorDepositActionRequest = { action }
+    if (action === 'mark_failed') {
+      const note = (depositNotes[deposit.id] ?? '').trim()
+      if (note) {
+        payload.note = note
+      }
+    }
+    depositCleanupMutation.mutate({ id: deposit.id, payload })
+  }
 
   const topupBip21 = useMemo(() => {
     const uri = topupQuery.data?.bip21_uri
@@ -247,6 +414,298 @@ export function OperatorPanel() {
 
       {token && (
         <>
+          <section className="operator-card">
+            <div className="operator-card-header">
+              <h3>Ledger & reconciliation</h3>
+              <button
+                type="button"
+                onClick={() => ledgerQuery.refetch()}
+                disabled={ledgerQuery.isFetching}
+              >
+                Refresh
+              </button>
+            </div>
+            {ledgerQuery.isLoading ? (
+              <p>Loading…</p>
+            ) : ledgerQuery.isError ? (
+              <p className="status-error">{(ledgerQuery.error as Error).message}</p>
+            ) : ledgerSnapshot ? (
+              <>
+                <p className="status-meta">
+                  Snapshot {ledgerCapturedAt?.toLocaleTimeString() ?? '—'} · Assets {formatSats(ledgerSnapshot.totals.assets_sats)} sats · Liabilities {formatSats(ledgerSnapshot.totals.liabilities_sats)} sats ·
+                  <span className={netClassName(ledgerSnapshot.totals.net_sats)}>
+                    Net {formatSigned(ledgerSnapshot.totals.net_sats)} sats
+                  </span>
+                </p>
+                <div className="ledger-breakdown">
+                  <div>
+                    <h4>Cashu</h4>
+                    <p>Assets: {formatSats(ledgerSnapshot.cashu.assets.available_sats)} sats</p>
+                    <p>Liabilities: {formatSats(ledgerSnapshot.cashu.liabilities.total_sats)} sats</p>
+                    <p className={netClassName(ledgerSnapshot.cashu.net_sats)}>
+                      Net {formatSigned(ledgerSnapshot.cashu.net_sats)} sats
+                    </p>
+                    <ul>
+                      <li>
+                        Awaiting confirmations: {formatSats(ledgerSnapshot.cashu.liabilities.awaiting_confirmations.amount_sats)} sats · {ledgerSnapshot.cashu.liabilities.awaiting_confirmations.count} deposits
+                      </li>
+                      <li>
+                        Minting/delivering: {formatSats(ledgerSnapshot.cashu.liabilities.minting.amount_sats)} sats · {ledgerSnapshot.cashu.liabilities.minting.count} deposits
+                      </li>
+                      <li>
+                        Ready for pickup: {formatSats(ledgerSnapshot.cashu.liabilities.ready.amount_sats)} sats · {ledgerSnapshot.cashu.liabilities.ready.count} deposits
+                      </li>
+                    </ul>
+                  </div>
+                  <div>
+                    <h4>On-chain</h4>
+                    <p>
+                      Assets: {formatSats(ledgerSnapshot.onchain.assets.available_sats)} sats
+                      {' '}
+                      <span className="status-meta">
+                        (confirmed {formatSats(ledgerSnapshot.onchain.assets.confirmed)} · trusted pending {formatSats(ledgerSnapshot.onchain.assets.trusted_pending)})
+                      </span>
+                    </p>
+                    <p>Liabilities: {formatSats(ledgerSnapshot.onchain.liabilities.total_sats)} sats</p>
+                    <p className={netClassName(ledgerSnapshot.onchain.net_sats)}>
+                      Net {formatSigned(ledgerSnapshot.onchain.net_sats)} sats
+                    </p>
+                    <ul>
+                      <li>
+                        Awaiting tokens: {formatSats(ledgerSnapshot.onchain.liabilities.funding.amount_sats)} sats · {ledgerSnapshot.onchain.liabilities.funding.count} requests
+                      </li>
+                      <li>
+                        Queued: {formatSats(ledgerSnapshot.onchain.liabilities.queued.amount_sats)} sats · {ledgerSnapshot.onchain.liabilities.queued.count} withdrawals
+                      </li>
+                      <li>
+                        Broadcasting: {formatSats(ledgerSnapshot.onchain.liabilities.broadcasting.amount_sats)} sats · {ledgerSnapshot.onchain.liabilities.broadcasting.count} withdrawals
+                      </li>
+                      <li>
+                        Confirming: {formatSats(ledgerSnapshot.onchain.liabilities.confirming.amount_sats)} sats · {ledgerSnapshot.onchain.liabilities.confirming.count} withdrawals
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <p>No ledger data yet.</p>
+            )}
+          </section>
+
+          <section className="operator-card">
+            <div className="operator-card-header">
+              <h3>Stuck withdrawals</h3>
+              <button type="button" onClick={() => cleanupQuery.refetch()} disabled={cleanupQuery.isFetching}>
+                Refresh
+              </button>
+            </div>
+            {cleanupQuery.isLoading ? (
+              <p>Loading…</p>
+            ) : cleanupQuery.isError ? (
+              <p className="status-error">{(cleanupQuery.error as Error).message}</p>
+            ) : cleanupItems.length === 0 ? (
+              <p>No withdrawals need manual cleanup right now.</p>
+            ) : (
+              <div className="operator-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>State</th>
+                      <th>Amount</th>
+                      <th>Address</th>
+                      <th>Txid</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cleanupItems.map((wd) => {
+                      const amount = wd.token_value_sats ?? wd.requested_amount_sats ?? 0
+                      const createdAt = wd.created_at ? new Date(wd.created_at).toLocaleString() : '—'
+                      const canSettle = wd.state !== 'settled' && wd.state !== 'funding'
+                      const canFail = wd.state !== 'settled'
+                      const canRequeue =
+                        wd.state === 'failed' || wd.state === 'broadcasting' || wd.state === 'confirming'
+                      const canArchive = wd.state === 'failed' || wd.state === 'funding'
+                      return (
+                        <tr key={wd.id}>
+                          <td>
+                            <div className="stacked">
+                              <span className="status-meta code">{wd.id}</span>
+                              <span className="status-meta">{createdAt}</span>
+                            </div>
+                          </td>
+                          <td>{wd.state}</td>
+                          <td>{formatSats(amount)} sats</td>
+                          <td className="status-meta code">{wd.delivery_address}</td>
+                          <td className="status-meta code">{wd.txid ?? '—'}</td>
+                          <td>
+                            <div className="cleanup-inputs">
+                              <label>
+                                Failure note
+                                <input
+                                  type="text"
+                                  value={cleanupNotes[wd.id] ?? ''}
+                                  onChange={(e) => handleCleanupNoteChange(wd.id, e.target.value)}
+                                  placeholder="optional"
+                                />
+                              </label>
+                              <label>
+                                Override txid
+                                <input
+                                  type="text"
+                                  value={cleanupTxids[wd.id] ?? ''}
+                                  onChange={(e) => handleCleanupTxidChange(wd.id, e.target.value)}
+                                  placeholder="leave blank to reuse"
+                                />
+                              </label>
+                            </div>
+                            <div className="button-row">
+                              <button
+                                type="button"
+                                className="secondary"
+                                onClick={() => handleCleanupAction(wd, 'mark_settled')}
+                                disabled={!token || !canSettle || cleanupMutation.isPending}
+                              >
+                                Mark settled
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary"
+                                onClick={() => handleCleanupAction(wd, 'mark_failed')}
+                                disabled={!token || !canFail || cleanupMutation.isPending}
+                              >
+                                Mark failed
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary"
+                                onClick={() => handleCleanupAction(wd, 'requeue')}
+                                disabled={!token || !canRequeue || cleanupMutation.isPending}
+                              >
+                                Requeue
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary"
+                                onClick={() => handleCleanupAction(wd, 'archive')}
+                                disabled={!token || !canArchive || cleanupMutation.isPending}
+                              >
+                                Archive
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {cleanupMutation.isError && (
+              <p className="status-error">{(cleanupMutation.error as Error).message}</p>
+            )}
+          </section>
+
+          <section className="operator-card">
+            <div className="operator-card-header">
+              <h3>Stuck deposits</h3>
+              <button
+                type="button"
+                onClick={() => depositCleanupQuery.refetch()}
+                disabled={depositCleanupQuery.isFetching}
+              >
+                Refresh
+              </button>
+            </div>
+            {depositCleanupQuery.isLoading ? (
+              <p>Loading…</p>
+            ) : depositCleanupQuery.isError ? (
+              <p className="status-error">{(depositCleanupQuery.error as Error).message}</p>
+            ) : depositItems.length === 0 ? (
+              <p>No deposits need manual cleanup right now.</p>
+            ) : (
+              <div className="operator-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>State</th>
+                      <th>Amount</th>
+                      <th>Address</th>
+                      <th>Confs</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {depositItems.map((dep) => {
+                      const createdAt = dep.created_at ? new Date(dep.created_at).toLocaleString() : '—'
+                      const canFulfill = dep.state === 'ready' || dep.state === 'delivering'
+                      const canFail = dep.state !== 'fulfilled' && dep.state !== 'archived_by_operator'
+                      const canArchive = dep.state === 'failed' || dep.state === 'fulfilled'
+                      return (
+                        <tr key={dep.id}>
+                          <td>
+                            <div className="stacked">
+                              <span className="status-meta code">{dep.id}</span>
+                              <span className="status-meta">{createdAt}</span>
+                            </div>
+                          </td>
+                          <td>{dep.state}</td>
+                          <td>{formatSats(dep.amount_sats)} sats</td>
+                          <td className="status-meta code">{dep.address}</td>
+                          <td>{dep.confirmations} / {dep.target_confirmations}</td>
+                          <td>
+                            <div className="cleanup-inputs">
+                              <label>
+                                Failure note
+                                <input
+                                  type="text"
+                                  value={depositNotes[dep.id] ?? ''}
+                                  onChange={(e) => handleDepositNoteChange(dep.id, e.target.value)}
+                                  placeholder="optional"
+                                />
+                              </label>
+                            </div>
+                            <div className="button-row">
+                              <button
+                                type="button"
+                                className="secondary"
+                                onClick={() => handleDepositAction(dep, 'mark_fulfilled')}
+                                disabled={!token || !canFulfill || depositCleanupMutation.isPending}
+                              >
+                                Mark fulfilled
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary"
+                                onClick={() => handleDepositAction(dep, 'mark_failed')}
+                                disabled={!token || !canFail || depositCleanupMutation.isPending}
+                              >
+                                Mark failed
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary"
+                                onClick={() => handleDepositAction(dep, 'archive')}
+                                disabled={!token || !canArchive || depositCleanupMutation.isPending}
+                              >
+                                Archive
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {depositCleanupMutation.isError && (
+              <p className="status-error">{(depositCleanupMutation.error as Error).message}</p>
+            )}
+          </section>
+
           <div className="operator-section">
             <div className="section-heading">
               <h2>Onchain</h2>

@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{AUTHORIZATION, CONTENT_TYPE, HOST},
@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use backend::cashu::{TokenMintError, token_mint_url, token_total_amount};
-use backend::db::{Deposit, DepositState, Withdrawal, WithdrawalState};
+use backend::db::{Deposit, DepositState, StateLiabilityRow, Withdrawal, WithdrawalState};
 use backend::onchain::{OnchainBalance, OnchainWallet};
 use backend::wallet::WalletHandle;
 use cdk::Amount;
@@ -31,12 +31,30 @@ type ApiResult<T> = Result<Json<ApiResponse<T>>, (StatusCode, Json<ApiError>)>;
 const WALLET_TOPUP_LABEL: &str = "Shuestand hot wallet top-up";
 const PAYMENT_REQUEST_TTL_SECS: i64 = 300;
 
+const DEFAULT_OPERATOR_WITHDRAWAL_LIMIT: usize = 50;
+const DEFAULT_WITHDRAWAL_STATES: [WithdrawalState; 5] = [
+    WithdrawalState::Funding,
+    WithdrawalState::Queued,
+    WithdrawalState::Broadcasting,
+    WithdrawalState::Confirming,
+    WithdrawalState::Failed,
+];
+const DEFAULT_DEPOSIT_STATES: [DepositState; 6] = [
+    DepositState::Pending,
+    DepositState::Confirming,
+    DepositState::Minting,
+    DepositState::Delivering,
+    DepositState::Ready,
+    DepositState::Failed,
+];
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthcheck))
         .route("/metrics", get(export_metrics))
         .route("/api/v1/deposits", post(create_deposit))
         .route("/api/v1/deposits/:id", get(get_deposit))
+        .route("/api/v1/deposits/:id/pickup", post(pickup_deposit))
         .route("/api/v1/withdrawals", post(request_withdrawal))
         .route("/api/v1/withdrawals/:id", get(get_withdrawal))
         .route(
@@ -56,6 +74,20 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/cashu/send", post(send_cashu_token))
         .route("/api/v1/cashu/introspect", post(inspect_cashu_token))
+        .route("/api/v1/operator/ledger", get(get_ledger_snapshot))
+        .route("/api/v1/operator/deposits", get(list_operator_deposits))
+        .route(
+            "/api/v1/operator/deposits/:id/actions",
+            post(operate_deposit),
+        )
+        .route(
+            "/api/v1/operator/withdrawals",
+            get(list_operator_withdrawals),
+        )
+        .route(
+            "/api/v1/operator/withdrawals/:id/actions",
+            post(operate_withdrawal),
+        )
         .route("/api/v1/float/status", get(get_float_status))
         .with_state(state)
 }
@@ -80,6 +112,12 @@ struct DepositRequest {
     metadata: Option<serde_json::Value>,
 }
 
+#[derive(Serialize)]
+struct DepositCreateResponse {
+    deposit: Deposit,
+    pickup_token: String,
+}
+
 #[derive(Deserialize, Debug)]
 struct WithdrawalRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,6 +128,16 @@ struct WithdrawalRequest {
     max_fee_sats: Option<u64>,
     #[serde(default)]
     create_payment_request: bool,
+}
+
+#[derive(Deserialize)]
+struct DepositPickupRequest {
+    pickup_token: String,
+}
+
+#[derive(Serialize)]
+struct DepositPickupResponse {
+    token: String,
 }
 
 #[derive(Serialize)]
@@ -267,6 +315,117 @@ struct CashuWalletBalanceResponse {
     reserved: u64,
 }
 
+#[derive(Deserialize, Default)]
+struct OperatorListQuery {
+    #[serde(default)]
+    state: Vec<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct WithdrawalActionRequest {
+    action: WithdrawalActionKind,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    txid: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WithdrawalActionKind {
+    MarkSettled,
+    MarkFailed,
+    Requeue,
+    Archive,
+}
+
+#[derive(Deserialize)]
+struct DepositActionRequest {
+    action: DepositActionKind,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DepositActionKind {
+    MarkFulfilled,
+    MarkFailed,
+    Archive,
+}
+
+#[derive(Serialize)]
+struct LedgerSnapshotResponse {
+    captured_at: String,
+    float_target_sats: u64,
+    cashu: CashuLedgerResponse,
+    onchain: OnchainLedgerResponse,
+    totals: LedgerTotalsResponse,
+}
+
+#[derive(Serialize)]
+struct LedgerTotalsResponse {
+    assets_sats: u64,
+    liabilities_sats: u64,
+    net_sats: i64,
+}
+
+#[derive(Serialize)]
+struct CashuLedgerResponse {
+    assets: CashuAssetBreakdown,
+    liabilities: CashuLiabilityBreakdown,
+    net_sats: i64,
+}
+
+#[derive(Serialize)]
+struct CashuAssetBreakdown {
+    spendable: u64,
+    pending: u64,
+    reserved: u64,
+    available_sats: u64,
+}
+
+#[derive(Serialize)]
+struct CashuLiabilityBreakdown {
+    awaiting_confirmations: LiabilityBucket,
+    minting: LiabilityBucket,
+    ready: LiabilityBucket,
+    total_sats: u64,
+}
+
+#[derive(Serialize)]
+struct LiabilityBucket {
+    amount_sats: u64,
+    count: u64,
+}
+
+#[derive(Serialize)]
+struct OnchainLedgerResponse {
+    assets: OnchainAssetBreakdown,
+    liabilities: OnchainLiabilityBreakdown,
+    net_sats: i64,
+}
+
+#[derive(Serialize)]
+struct OnchainAssetBreakdown {
+    confirmed: u64,
+    trusted_pending: u64,
+    untrusted_pending: u64,
+    immature: u64,
+    available_sats: u64,
+}
+
+#[derive(Serialize)]
+struct OnchainLiabilityBreakdown {
+    funding: LiabilityBucket,
+    queued: LiabilityBucket,
+    broadcasting: LiabilityBucket,
+    confirming: LiabilityBucket,
+    total_sats: u64,
+}
+
 #[derive(Deserialize)]
 struct CashuSendRequest {
     amount_sats: u64,
@@ -359,7 +518,7 @@ async fn export_metrics(State(state): State<AppState>) -> impl IntoResponse {
 async fn create_deposit(
     State(state): State<AppState>,
     Json(req): Json<DepositRequest>,
-) -> ApiResult<Deposit> {
+) -> ApiResult<DepositCreateResponse> {
     const MIN_DEPOSIT_SATS: u64 = super::MIN_DEPOSIT_SATS;
     const MAX_DEPOSIT_SATS: u64 = super::MAX_DEPOSIT_SATS;
 
@@ -404,6 +563,8 @@ async fn create_deposit(
         .map_err(server_error)?;
     let now = Utc::now();
 
+    let pickup_token = format!("pc_{}", Uuid::new_v4());
+
     let deposit = Deposit {
         id: id.clone(),
         amount_sats: req.amount_sats,
@@ -418,6 +579,8 @@ async fn create_deposit(
         created_at: now,
         updated_at: now,
         minted_token: None,
+        pickup_token: pickup_token.clone(),
+        pickup_revealed_at: None,
         token: None,
         minted_amount_sats: None,
         token_ready_at: None,
@@ -435,7 +598,12 @@ async fn create_deposit(
         .await
         .map_err(server_error)?;
 
-    Ok(Json(ApiResponse { data: deposit }))
+    Ok(Json(ApiResponse {
+        data: DepositCreateResponse {
+            deposit,
+            pickup_token,
+        },
+    }))
 }
 
 async fn get_deposit(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Deposit> {
@@ -444,6 +612,50 @@ async fn get_deposit(State(state): State<AppState>, Path(id): Path<String>) -> A
         Err(sqlx::Error::RowNotFound) => Err(not_found("deposit_not_found")),
         Err(err) => Err(server_error(err)),
     }
+}
+
+async fn pickup_deposit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<DepositPickupRequest>,
+) -> ApiResult<DepositPickupResponse> {
+    let pickup_token = req.pickup_token.trim();
+    if pickup_token.is_empty() {
+        return Err(invalid_request("pickup_token_required"));
+    }
+
+    let deposit = match state.db.fetch_deposit(&id).await {
+        Ok(dep) => dep,
+        Err(sqlx::Error::RowNotFound) => return Err(not_found("deposit_not_found")),
+        Err(err) => return Err(server_error(err)),
+    };
+
+    if deposit.pickup_token != pickup_token {
+        return Err(invalid_request("pickup_token_invalid"));
+    }
+
+    let minted = deposit
+        .minted_token
+        .clone()
+        .ok_or_else(|| invalid_request("token_not_ready"))?;
+
+    match deposit.state {
+        DepositState::Ready => {
+            state
+                .db
+                .record_pickup_success(&deposit.id)
+                .await
+                .map_err(server_error)?;
+        }
+        DepositState::Fulfilled => {}
+        _ => {
+            return Err(conflict("deposit_not_ready_for_pickup"));
+        }
+    }
+
+    Ok(Json(ApiResponse {
+        data: DepositPickupResponse { token: minted },
+    }))
 }
 
 async fn request_withdrawal(
@@ -1032,6 +1244,429 @@ async fn get_cashu_wallet_balance(
     }))
 }
 
+async fn list_operator_deposits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<OperatorListQuery>,
+) -> ApiResult<Vec<Deposit>> {
+    require_operator_token(&state, &headers)?;
+
+    let states = if query.state.is_empty() {
+        DEFAULT_DEPOSIT_STATES.to_vec()
+    } else {
+        let mut parsed = Vec::with_capacity(query.state.len());
+        for raw in query.state.iter() {
+            match DepositState::try_from(raw.as_str()) {
+                Ok(state) => parsed.push(state),
+                Err(_) => {
+                    return Err(invalid_request(format!("unknown deposit state '{}'", raw)));
+                }
+            }
+        }
+        if parsed.is_empty() {
+            DEFAULT_DEPOSIT_STATES.to_vec()
+        } else {
+            parsed
+        }
+    };
+
+    let mut deposits = state
+        .db
+        .list_deposits_by_state(&states)
+        .await
+        .map_err(server_error)?;
+    deposits.sort_by_key(|dep| dep.created_at);
+
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_OPERATOR_WITHDRAWAL_LIMIT)
+        .min(DEFAULT_OPERATOR_WITHDRAWAL_LIMIT);
+    if deposits.len() > limit {
+        deposits.truncate(limit);
+    }
+
+    Ok(Json(ApiResponse { data: deposits }))
+}
+
+async fn list_operator_withdrawals(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<OperatorListQuery>,
+) -> ApiResult<Vec<WithdrawalView>> {
+    require_operator_token(&state, &headers)?;
+
+    let states = if query.state.is_empty() {
+        DEFAULT_WITHDRAWAL_STATES.to_vec()
+    } else {
+        let mut parsed = Vec::with_capacity(query.state.len());
+        for raw in query.state.iter() {
+            match WithdrawalState::try_from(raw.as_str()) {
+                Ok(state) => parsed.push(state),
+                Err(_) => {
+                    return Err(invalid_request(format!(
+                        "unknown withdrawal state '{}'",
+                        raw
+                    )));
+                }
+            }
+        }
+        if parsed.is_empty() {
+            DEFAULT_WITHDRAWAL_STATES.to_vec()
+        } else {
+            parsed
+        }
+    };
+
+    let mut withdrawals = state
+        .db
+        .list_withdrawals_by_state(&states)
+        .await
+        .map_err(server_error)?;
+    withdrawals.sort_by_key(|wd| wd.created_at);
+
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_OPERATOR_WITHDRAWAL_LIMIT)
+        .min(DEFAULT_OPERATOR_WITHDRAWAL_LIMIT);
+    if withdrawals.len() > limit {
+        withdrawals.truncate(limit);
+    }
+
+    let views = withdrawals
+        .into_iter()
+        .map(|wd| WithdrawalView::new(wd, state.cashu_mint_url.as_deref(), None))
+        .collect();
+
+    Ok(Json(ApiResponse { data: views }))
+}
+
+async fn operate_deposit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<DepositActionRequest>,
+) -> ApiResult<Deposit> {
+    require_operator_token(&state, &headers)?;
+    let deposit = match state.db.fetch_deposit(&id).await {
+        Ok(dep) => dep,
+        Err(sqlx::Error::RowNotFound) => return Err(not_found("deposit_not_found")),
+        Err(err) => return Err(server_error(err)),
+    };
+
+    match req.action {
+        DepositActionKind::MarkFulfilled => {
+            if !matches!(
+                deposit.state,
+                DepositState::Delivering | DepositState::Ready
+            ) {
+                return Err(invalid_request(
+                    "only delivering/ready deposits can be fulfilled manually",
+                ));
+            }
+            state
+                .db
+                .manual_update_deposit_state(&deposit.id, DepositState::Fulfilled, None, true)
+                .await
+                .map_err(server_error)?;
+        }
+        DepositActionKind::MarkFailed => {
+            if deposit.state == DepositState::Fulfilled {
+                return Err(invalid_request(
+                    "fulfilled deposits cannot be marked failed",
+                ));
+            }
+            if deposit.state == DepositState::ArchivedByOperator {
+                return Err(invalid_request("archived deposits cannot be marked failed"));
+            }
+            let reason = req
+                .note
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| "marked failed by operator".to_string());
+            state
+                .db
+                .manual_update_deposit_state(&deposit.id, DepositState::Failed, Some(reason), false)
+                .await
+                .map_err(server_error)?;
+        }
+        DepositActionKind::Archive => {
+            if !matches!(
+                deposit.state,
+                DepositState::Failed | DepositState::Fulfilled
+            ) {
+                return Err(invalid_request(
+                    "only failed or fulfilled deposits can be archived",
+                ));
+            }
+            state
+                .db
+                .manual_update_deposit_state(
+                    &deposit.id,
+                    DepositState::ArchivedByOperator,
+                    None,
+                    false,
+                )
+                .await
+                .map_err(server_error)?;
+        }
+    }
+
+    let updated = state.db.fetch_deposit(&id).await.map_err(server_error)?;
+    Ok(Json(ApiResponse { data: updated }))
+}
+
+async fn operate_withdrawal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<WithdrawalActionRequest>,
+) -> ApiResult<WithdrawalView> {
+    require_operator_token(&state, &headers)?;
+    let withdrawal = match state.db.fetch_withdrawal(&id).await {
+        Ok(wd) => wd,
+        Err(sqlx::Error::RowNotFound) => return Err(not_found("withdrawal_not_found")),
+        Err(err) => return Err(server_error(err)),
+    };
+
+    match req.action {
+        WithdrawalActionKind::MarkSettled => {
+            if matches!(
+                withdrawal.state,
+                WithdrawalState::Settled | WithdrawalState::Funding
+            ) {
+                return Err(invalid_request(
+                    "withdrawal cannot be marked settled from its current state",
+                ));
+            }
+            let provided_txid = req
+                .txid
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            let txid = provided_txid.or(withdrawal.txid.clone());
+            state
+                .db
+                .manual_update_withdrawal_state(
+                    &withdrawal.id,
+                    WithdrawalState::Settled,
+                    txid,
+                    None,
+                    false,
+                )
+                .await
+                .map_err(server_error)?;
+        }
+        WithdrawalActionKind::MarkFailed => {
+            if withdrawal.state == WithdrawalState::Settled {
+                return Err(invalid_request(
+                    "settled withdrawals cannot be marked failed",
+                ));
+            }
+            let reason = req
+                .note
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| "marked failed by operator".to_string());
+            let txid = withdrawal.txid.clone();
+            state
+                .db
+                .manual_update_withdrawal_state(
+                    &withdrawal.id,
+                    WithdrawalState::Failed,
+                    txid,
+                    Some(reason),
+                    false,
+                )
+                .await
+                .map_err(server_error)?;
+        }
+        WithdrawalActionKind::Requeue => {
+            if !matches!(
+                withdrawal.state,
+                WithdrawalState::Failed
+                    | WithdrawalState::Broadcasting
+                    | WithdrawalState::Confirming
+            ) {
+                return Err(invalid_request(
+                    "only failed/broadcasting/confirming withdrawals can be requeued",
+                ));
+            }
+            state
+                .db
+                .manual_update_withdrawal_state(
+                    &withdrawal.id,
+                    WithdrawalState::Queued,
+                    withdrawal.txid.clone(),
+                    None,
+                    true,
+                )
+                .await
+                .map_err(server_error)?;
+        }
+        WithdrawalActionKind::Archive => {
+            if !matches!(
+                withdrawal.state,
+                WithdrawalState::Failed | WithdrawalState::Funding
+            ) {
+                return Err(invalid_request(
+                    "only failed or unfunded withdrawals can be archived",
+                ));
+            }
+            state
+                .db
+                .manual_update_withdrawal_state(
+                    &withdrawal.id,
+                    WithdrawalState::ArchivedByOperator,
+                    withdrawal.txid.clone(),
+                    withdrawal.error.clone(),
+                    false,
+                )
+                .await
+                .map_err(server_error)?;
+        }
+    }
+
+    let updated = state.db.fetch_withdrawal(&id).await.map_err(server_error)?;
+
+    Ok(Json(ApiResponse {
+        data: WithdrawalView::new(updated, state.cashu_mint_url.as_deref(), None),
+    }))
+}
+
+async fn get_ledger_snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<LedgerSnapshotResponse> {
+    require_operator_token(&state, &headers)?;
+
+    let onchain_balance = match state.onchain_wallet.as_ref() {
+        Some(wallet) => Some(wallet.balance().await.map_err(server_error)?),
+        None => None,
+    };
+
+    let cashu_balances = match state.cashu_wallet.as_ref() {
+        Some(handle) => {
+            let guard = handle.lock().await;
+            let spendable = guard.total_balance().await.map_err(server_error)?.to_u64();
+            let pending = guard
+                .total_pending_balance()
+                .await
+                .map_err(server_error)?
+                .to_u64();
+            let reserved = guard
+                .total_reserved_balance()
+                .await
+                .map_err(server_error)?
+                .to_u64();
+            Some((spendable, pending, reserved))
+        }
+        None => None,
+    };
+
+    let deposit_rows = state
+        .db
+        .ledger_deposit_liabilities()
+        .await
+        .map_err(server_error)?;
+    let withdrawal_rows = state
+        .db
+        .ledger_withdrawal_liabilities()
+        .await
+        .map_err(server_error)?;
+
+    let deposits_pending = sum_deposit_states(
+        &deposit_rows,
+        &[DepositState::Pending, DepositState::Confirming],
+    );
+    let deposits_minting = sum_deposit_states(
+        &deposit_rows,
+        &[DepositState::Minting, DepositState::Delivering],
+    );
+    let deposits_ready = sum_deposit_states(&deposit_rows, &[DepositState::Ready]);
+
+    let withdrawals_funding = sum_withdrawal_states(&withdrawal_rows, &[WithdrawalState::Funding]);
+    let withdrawals_queued = sum_withdrawal_states(&withdrawal_rows, &[WithdrawalState::Queued]);
+    let withdrawals_broadcasting =
+        sum_withdrawal_states(&withdrawal_rows, &[WithdrawalState::Broadcasting]);
+    let withdrawals_confirming =
+        sum_withdrawal_states(&withdrawal_rows, &[WithdrawalState::Confirming]);
+
+    let (cashu_spendable, cashu_pending, cashu_reserved) = cashu_balances.unwrap_or((0, 0, 0));
+    let cashu_assets = CashuAssetBreakdown {
+        spendable: cashu_spendable,
+        pending: cashu_pending,
+        reserved: cashu_reserved,
+        available_sats: cashu_spendable,
+    };
+
+    let onchain_assets = if let Some(summary) = onchain_balance {
+        OnchainAssetBreakdown {
+            confirmed: summary.confirmed,
+            trusted_pending: summary.trusted_pending,
+            untrusted_pending: summary.untrusted_pending,
+            immature: summary.immature,
+            available_sats: summary.confirmed + summary.trusted_pending,
+        }
+    } else {
+        OnchainAssetBreakdown {
+            confirmed: 0,
+            trusted_pending: 0,
+            untrusted_pending: 0,
+            immature: 0,
+            available_sats: 0,
+        }
+    };
+
+    let cashu_liability_total =
+        deposits_pending.amount_sats + deposits_minting.amount_sats + deposits_ready.amount_sats;
+    let onchain_liability_total = withdrawals_queued.amount_sats
+        + withdrawals_broadcasting.amount_sats
+        + withdrawals_confirming.amount_sats;
+
+    let cashu_net = cashu_assets.available_sats as i64 - cashu_liability_total as i64;
+    let onchain_net = onchain_assets.available_sats as i64 - onchain_liability_total as i64;
+
+    let totals = LedgerTotalsResponse {
+        assets_sats: cashu_assets.available_sats + onchain_assets.available_sats,
+        liabilities_sats: cashu_liability_total + onchain_liability_total,
+        net_sats: cashu_net + onchain_net,
+    };
+
+    Ok(Json(ApiResponse {
+        data: LedgerSnapshotResponse {
+            captured_at: Utc::now().to_rfc3339(),
+            float_target_sats: state.float_target_sats,
+            cashu: CashuLedgerResponse {
+                assets: cashu_assets,
+                liabilities: CashuLiabilityBreakdown {
+                    awaiting_confirmations: deposits_pending,
+                    minting: deposits_minting,
+                    ready: deposits_ready,
+                    total_sats: cashu_liability_total,
+                },
+                net_sats: cashu_net,
+            },
+            onchain: OnchainLedgerResponse {
+                assets: onchain_assets,
+                liabilities: OnchainLiabilityBreakdown {
+                    funding: withdrawals_funding,
+                    queued: withdrawals_queued,
+                    broadcasting: withdrawals_broadcasting,
+                    confirming: withdrawals_confirming,
+                    total_sats: onchain_liability_total,
+                },
+                net_sats: onchain_net,
+            },
+            totals,
+        },
+    }))
+}
+
 async fn send_cashu_token(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1119,6 +1754,41 @@ fn json_kind(value: &serde_json::Value) -> &'static str {
         serde_json::Value::Array(_) => "array",
         serde_json::Value::Object(_) => "object",
     }
+}
+
+fn sum_deposit_states(rows: &[StateLiabilityRow], states: &[DepositState]) -> LiabilityBucket {
+    let mut bucket = LiabilityBucket {
+        amount_sats: 0,
+        count: 0,
+    };
+    for row in rows {
+        if let Ok(state) = DepositState::try_from(row.state.as_str()) {
+            if states.iter().any(|target| *target == state) {
+                bucket.amount_sats += row.amount_sats;
+                bucket.count += row.count;
+            }
+        }
+    }
+    bucket
+}
+
+fn sum_withdrawal_states(
+    rows: &[StateLiabilityRow],
+    states: &[WithdrawalState],
+) -> LiabilityBucket {
+    let mut bucket = LiabilityBucket {
+        amount_sats: 0,
+        count: 0,
+    };
+    for row in rows {
+        if let Ok(state) = WithdrawalState::try_from(row.state.as_str()) {
+            if states.iter().any(|target| *target == state) {
+                bucket.amount_sats += row.amount_sats;
+                bucket.count += row.count;
+            }
+        }
+    }
+    bucket
 }
 
 fn infer_base_url(headers: &HeaderMap) -> Option<String> {

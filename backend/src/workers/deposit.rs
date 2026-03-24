@@ -1,9 +1,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use cdk::Amount;
 use cdk::wallet::{SendOptions, Wallet as CashuWallet};
+use reqwest::{Client, Url};
+use serde::Serialize;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
@@ -14,6 +17,7 @@ pub struct DepositWorker {
     sender: Arc<dyn DepositTokenSender + Send + Sync>,
     interval: Duration,
     max_attempts: u32,
+    http: Client,
 }
 
 impl DepositWorker {
@@ -22,12 +26,14 @@ impl DepositWorker {
         sender: Arc<dyn DepositTokenSender + Send + Sync>,
         interval: Duration,
         max_attempts: u32,
+        http: Client,
     ) -> Self {
         Self {
             db,
             sender,
             interval,
             max_attempts: max_attempts.max(1),
+            http,
         }
     }
 
@@ -96,19 +102,86 @@ impl DepositWorker {
             let attempt_number = deposit.delivery_attempt_count + 1;
             let exhausted = attempt_number >= self.max_attempts;
 
-            if deposit.minted_token.is_none() {
-                self.db
-                    .record_delivery_failure(
-                        &deposit.id,
-                        if exhausted {
-                            DepositState::Failed
-                        } else {
-                            DepositState::Minting
-                        },
-                        "missing minted token; returning to minting",
-                    )
-                    .await?;
-                continue;
+            let minted_token = match deposit.minted_token.as_deref() {
+                Some(token) => token,
+                None => {
+                    self.db
+                        .record_delivery_failure(
+                            &deposit.id,
+                            if exhausted {
+                                DepositState::Failed
+                            } else {
+                                DepositState::Minting
+                            },
+                            "missing minted token; returning to minting",
+                        )
+                        .await?;
+                    continue;
+                }
+            };
+
+            if let Some(hint) = deposit.delivery_hint.as_deref() {
+                match parse_delivery_hint(hint) {
+                    DeliveryHintKind::Webhook(url) => {
+                        tracing::info!(
+                            target: "backend",
+                            id = %deposit.id,
+                            url = %url,
+                            "attempting webhook delivery"
+                        );
+                        match self
+                            .deliver_webhook(
+                                &url,
+                                &deposit.id,
+                                deposit.amount_sats,
+                                minted_token,
+                                deposit.delivery_hint.as_deref(),
+                                deposit.txid.as_deref(),
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                tracing::info!(
+                                    target: "backend",
+                                    id = %deposit.id,
+                                    "webhook delivery succeeded"
+                                );
+                                self.db
+                                    .record_delivery_success(&deposit.id, DepositState::Ready)
+                                    .await?;
+                                self.db.record_pickup_success(&deposit.id).await?;
+                                continue;
+                            }
+                            Err(err) => {
+                                let message = err.to_string();
+                                tracing::warn!(
+                                    target: "backend",
+                                    id = %deposit.id,
+                                    attempt = attempt_number,
+                                    max_attempts = self.max_attempts,
+                                    error = %message,
+                                    "webhook delivery failed"
+                                );
+                                self.db
+                                    .record_delivery_failure(
+                                        &deposit.id,
+                                        DepositState::Ready,
+                                        &message,
+                                    )
+                                    .await?;
+                                continue;
+                            }
+                        }
+                    }
+                    DeliveryHintKind::Unsupported => {
+                        tracing::debug!(
+                            target: "backend",
+                            id = %deposit.id,
+                            hint,
+                            "delivery hint unsupported for auto delivery"
+                        );
+                    }
+                }
             }
 
             tracing::info!(
@@ -123,6 +196,61 @@ impl DepositWorker {
 
         Ok(())
     }
+
+    async fn deliver_webhook(
+        &self,
+        url: &Url,
+        deposit_id: &str,
+        amount_sats: u64,
+        token: &str,
+        hint: Option<&str>,
+        txid: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let payload = DeliveryWebhookPayload {
+            deposit_id,
+            amount_sats,
+            token,
+            txid,
+            hint,
+        };
+        let resp = self
+            .http
+            .post(url.clone())
+            .json(&payload)
+            .send()
+            .await
+            .with_context(|| format!("failed to POST webhook for {}", deposit_id))?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(anyhow!("webhook {} returned {} {}", url, status, body))
+        }
+    }
+}
+
+enum DeliveryHintKind {
+    Webhook(Url),
+    Unsupported,
+}
+
+fn parse_delivery_hint(raw: &str) -> DeliveryHintKind {
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        if let Ok(url) = Url::parse(raw) {
+            return DeliveryHintKind::Webhook(url);
+        }
+    }
+    DeliveryHintKind::Unsupported
+}
+
+#[derive(Serialize)]
+struct DeliveryWebhookPayload<'a> {
+    deposit_id: &'a str,
+    amount_sats: u64,
+    token: &'a str,
+    txid: Option<&'a str>,
+    hint: Option<&'a str>,
 }
 
 pub struct MintedToken {

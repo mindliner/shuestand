@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
+import { copyTextWithFallback } from '../lib/clipboard'
 import type {
   Deposit,
   DepositState,
@@ -12,6 +13,11 @@ interface DepositStatusCardProps {
   error: Error | null
   isLoading: boolean
   hasSubmission: boolean
+  pickupToken?: string | null
+  onPickup?: () => void
+  pickupPending?: boolean
+  pickupError: Error | null
+  onClear?: () => void
 }
 
 interface WithdrawalStatusCardProps {
@@ -26,6 +32,11 @@ export function DepositStatusCard({
   error,
   isLoading,
   hasSubmission,
+  pickupToken,
+  onPickup,
+  pickupPending = false,
+  pickupError,
+  onClear,
 }: DepositStatusCardProps) {
   if (!hasSubmission) {
     return (
@@ -55,12 +66,19 @@ export function DepositStatusCard({
   }
 
   const bip21 = buildBip21Uri(deposit.address, deposit.amount_sats)
+  const pickupCode = pickupToken ? pickupToken.slice(-6).toUpperCase() : null
 
   return (
     <div className="status-block">
       <h3>Deposit progress</h3>
+      {pickupCode && (
+        <p className="status-meta">Pickup code: <strong>{pickupCode}</strong></p>
+      )}
       {deposit.delivery_hint && (
         <span className="hint-badge">Delivery: {deposit.delivery_hint}</span>
+      )}
+      {deposit.delivery_error && (
+        <p className="status-error">Delivery error: {deposit.delivery_error}</p>
       )}
       {bip21 && (
         <div className="qr-card">
@@ -74,6 +92,19 @@ export function DepositStatusCard({
       </p>
       <p className="status-meta code">{deposit.address}</p>
       <CopyButton label="Copy address" text={deposit.address} />
+      {deposit.state === 'ready' && (
+        <div className="status-block nested">
+          <p>Token is minted. Press the button when you're ready to claim it.</p>
+          {pickupToken && onPickup ? (
+            <button type="button" onClick={onPickup} disabled={pickupPending}>
+              {pickupPending ? 'Revealing…' : 'Reveal token'}
+            </button>
+          ) : (
+            <p className="status-error">Pickup token unavailable for this deposit.</p>
+          )}
+          {pickupError && <p className="status-error">{pickupError.message}</p>}
+        </div>
+      )}
       {deposit.txid && (
         <>
           <p className="status-meta code">tx: {deposit.txid}</p>
@@ -88,6 +119,11 @@ export function DepositStatusCard({
         </div>
       )}
       <StatusTimeline stages={DEPOSIT_STAGES} current={deposit.state} />
+      {onClear && (
+        <button type="button" className="link-button" onClick={onClear}>
+          Forget this deposit
+        </button>
+      )}
     </div>
   )
 }
@@ -211,15 +247,9 @@ export function CopyButton({ text, label }: CopyButtonProps) {
   const [state, setState] = useState<'idle' | 'copied' | 'error'>('idle')
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setState('copied')
-    } catch (err) {
-      console.error('copy failed', err)
-      setState('error')
-    } finally {
-      setTimeout(() => setState('idle'), 1500)
-    }
+    const success = await copyTextWithFallback(text)
+    setState(success ? 'copied' : 'error')
+    setTimeout(() => setState('idle'), 1500)
   }
 
   return (

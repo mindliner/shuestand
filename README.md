@@ -17,7 +17,7 @@ Shuestand lets users fund a Cashu wallet from on-chain Bitcoin or withdraw sats 
 1. **Bitcoin → Cashu**
    - User requests a deposit, gets a unique on-chain address (BIP21 URI + QR).
    - Chain watcher tracks mempool + confirmation depth; status is streamed to the UI with confirmation countdowns.
-   - Once the target confirmations clear, the backend mints tokens via the default mint and either pushes them to the provided wallet hint (cashu://, nut://, numopay order) or exposes the token/QR for manual pickup.
+   - Once the target confirmations clear, the backend mints tokens via the default mint. If the `delivery_hint` is an `http(s)` webhook we auto-post the token there; otherwise the kiosk shows a pickup screen (with resume code + clipboard helper) so the guest/operator can claim it later.
 
 2. **Cashu → Bitcoin**
    - User pastes/imports a Cashu token, sees a quote (amount, projected miner fee, eta).
@@ -35,7 +35,7 @@ Shuestand lets users fund a Cashu wallet from on-chain Bitcoin or withdraw sats 
 - **Bitcoin subsystem**: bitcoind/electrs client, address manager, confirmation oracle, rebroadcaster, fee estimator.
 - **Lightning adaptor**: LND/CLN wrapper for invoice creation, payment, keysend; auto-balancing policies for `Open_Hand` channels.
 - **Cashu mint client**: Nutshell-compatible RPC with token proof validation, minted-token storage, and redemption queue.
-- **NumoPay compatibility layer**: JSON/REST hooks that mirror the existing numopay.org contract (invoice creation, token delivery webhooks, and settlement callbacks) so shuestand kiosks can plug into the same merchant tooling without code changes.
+- **Delivery automation**: per-deposit resume/pickup tokens plus webhook delivery for any `http(s)` hints so kiosks can push tokens directly into upstream systems when configured.
 - **Risk + compliance guardrails**: rate limits, per-user caps, configurable fees/spreads, and operator alerts when reserve ratios drift.
 
 ### Address pool & chain watcher
@@ -161,6 +161,6 @@ cargo run --bin wallet -- pay lnbc1...
 - No local SQLite file is needed anymore; remove any leftover `shuestand.db` artifacts.
 
 ## Documentation
-- [`docs/api.md`](docs/api.md): REST contract for deposits, withdrawals, delivery hints, webhook callbacks, and numopay compatibility requirements.
+- [`docs/api.md`](docs/api.md): REST contract for deposits, withdrawals, delivery hints, and webhook callbacks.
 
 Let's iterate on this README as we lock in UX comps and deployment constraints.

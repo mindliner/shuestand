@@ -6,7 +6,7 @@ Base URL (dev): `http://localhost:8080`
 - Content-Type: `application/json`.
 - All responses wrap payloads in `{ "data": ... }` and errors in `{ "error": { "code": string, "message": string } }`.
 - Amounts are integers denominated in **satoshis**.
-- `delivery_hint` is an optional string that can hold either a Cashu wallet URL (`cashu://`, `nut://`) or an opaque label understood by upstream systems (e.g., numopay order ID).
+- `delivery_hint` is an optional string that can hold either a Cashu wallet URL (`cashu://`, `nut://`) or an opaque label understood by upstream systems (e.g., upstream order or session IDs).
 
 ## Entities
 
@@ -118,18 +118,18 @@ Response `202 Accepted`:
 Returns the withdrawal object including `txid`, `fee_paid_sats`, and `state` progression.
 
 ## Webhooks / Integrations
-- **NumoPay callback**: optional `POST` to operator-defined URL containing `deposit_id`, `state`, and `token` once the mint succeeds.
-- **Wallet push**: when `delivery_hint` is a wallet URL, we attempt a `POST {wallet}/api/v1/tokens` (exact verb TBD per wallet spec) and store success/failure status.
+- **Webhook delivery**: when `delivery_hint` is an `http(s)` URL, the backend POSTs `{ deposit_id, amount_sats, token, txid?, hint }` as soon as the token is minted. Any non-2xx response leaves the deposit in `ready` with the failure recorded so an operator/guest can fall back to manual pickup.
+- **Wallet push**: when `delivery_hint` is a wallet deeplink (`cashu://`, `nut://`), we surface it in the kiosk so the user can hand off to the native app; automatic pushes for those targets are still TBD per wallet spec.
 
 ## Environment knobs
-| Variable | Purpose | Default |
-|----------|---------|---------|
-| `BITCOIN_DESCRIPTOR` | Descriptor used to derive kiosk deposit addresses. Mandatory for real deployments. | _None (falls back to mock addresses)_ |
-| `BITCOIN_NETWORK` | `bitcoin`, `testnet`, `signet`, or `regtest`. | `regtest` |
-| `BITCOIN_ESPLORA_BASE_URL` | Base URL for an Esplora-compatible API the watcher can poll. | _None (disables confirmation tracker)_ |
-| `ADDRESS_POOL_TARGET` | Minimum count of pre-derived addresses kept in the ready pool. | `20` |
-| `DEPOSIT_TARGET_CONFIRMATIONS` | How many confirmations a deposit must reach before minting. | `3` |
-| `CONFIRMATION_POLL_INTERVAL_SECS` | How often the watcher polls the chain for updates. | `30` |
+|              Variable             |                                      Purpose                                       |                Default                 |
+|-----------------------------------|------------------------------------------------------------------------------------|----------------------------------------|
+| `BITCOIN_DESCRIPTOR`              | Descriptor used to derive kiosk deposit addresses. Mandatory for real deployments. | _None (falls back to mock addresses)_  |
+| `BITCOIN_NETWORK`                 | `bitcoin`, `testnet`, `signet`, or `regtest`.                                      | `regtest`                              |
+| `BITCOIN_ESPLORA_BASE_URL`        | Base URL for an Esplora-compatible API the watcher can poll.                       | _None (disables confirmation tracker)_ |
+| `ADDRESS_POOL_TARGET`             | Minimum count of pre-derived addresses kept in the ready pool.                     | `20`                                   |
+| `DEPOSIT_TARGET_CONFIRMATIONS`    | How many confirmations a deposit must reach before minting.                        | `3`                                    |
+| `CONFIRMATION_POLL_INTERVAL_SECS` | How often the watcher polls the chain for updates.                                 | `30`                                   |
 
 ## Error envelope
 ```json

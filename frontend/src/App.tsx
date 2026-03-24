@@ -4,10 +4,12 @@ import { useEffect, useState } from 'react'
 const STORAGE_KEYS = {
   deposit: 'shuestand.latestDepositId',
   withdrawal: 'shuestand.latestWithdrawalId',
+  deliveryAddress: 'shuestand.latestDeliveryAddress',
 }
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import './App.css'
 import { config } from './config'
+import { copyTextWithFallback } from './lib/clipboard'
 import { DELIVERY_TARGETS } from './config/deliveryTargets'
 import { detectTokenMint } from './lib/cashu'
 import type { CreateWithdrawalRequest } from './types/api'
@@ -17,6 +19,7 @@ import {
   createWithdrawal,
   getDeposit,
   getWithdrawal,
+  pickupDeposit,
 } from './lib/api'
 import {
   DepositStatusCard,
@@ -27,7 +30,7 @@ import { OperatorPanel } from './components/OperatorPanel'
 type Flow = 'deposit' | 'withdrawal'
 type ViewMode = 'kiosk' | 'operator'
 type TokenMintInfo =
-  | { mintUrl: string; isForeign: boolean }
+  | { mintUrl: string; isForeign: boolean; amount: number }
   | { error: string }
 
 const DEFAULT_AMOUNT = '5000'
@@ -50,15 +53,16 @@ export default function App() {
   const [customDeliveryHint, setCustomDeliveryHint] = useState('')
   const [token, setToken] = useState('')
   const [tokenMintInfo, setTokenMintInfo] = useState<TokenMintInfo | null>(null)
-  const [deliveryAddress, setDeliveryAddress] = useState(
-    'bc1qexampledestination'
-  )
+  const [deliveryAddress, setDeliveryAddress] = useState('')
   const [isSubmitting, setSubmitting] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [latestDepositId, setLatestDepositId] = useState<string | null>(null)
+  const [latestDepositPickupToken, setLatestDepositPickupToken] = useState<string | null>(null)
   const [latestWithdrawalId, setLatestWithdrawalId] = useState<string | null>(
     null
   )
+
+  const queryClient = useQueryClient()
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -66,11 +70,33 @@ export default function App() {
     }
     const storedDeposit = window.localStorage.getItem(STORAGE_KEYS.deposit)
     if (storedDeposit) {
-      setLatestDepositId(storedDeposit)
+      try {
+        const parsed = JSON.parse(storedDeposit)
+        if (parsed && typeof parsed === 'object' && typeof parsed.id === 'string') {
+          setLatestDepositId(parsed.id)
+          if (typeof parsed.pickupToken === 'string') {
+            setLatestDepositPickupToken(parsed.pickupToken)
+          } else {
+            setLatestDepositPickupToken(null)
+          }
+        } else {
+          setLatestDepositId(storedDeposit)
+          setLatestDepositPickupToken(null)
+        }
+      } catch {
+        setLatestDepositId(storedDeposit)
+        setLatestDepositPickupToken(null)
+      }
     }
     const storedWithdrawal = window.localStorage.getItem(STORAGE_KEYS.withdrawal)
     if (storedWithdrawal) {
       setLatestWithdrawalId(storedWithdrawal)
+    }
+    const storedDeliveryAddress = window.localStorage.getItem(
+      STORAGE_KEYS.deliveryAddress
+    )
+    if (storedDeliveryAddress) {
+      setDeliveryAddress(storedDeliveryAddress)
     }
   }, [])
 
@@ -80,10 +106,14 @@ export default function App() {
     }
   }, [flow])
 
-  const rememberDepositId = (id: string) => {
+  const rememberDeposit = (id: string, pickupToken: string) => {
     setLatestDepositId(id)
+    setLatestDepositPickupToken(pickupToken)
     if (typeof window !== 'undefined') {
-      window.localStorage.setItem(STORAGE_KEYS.deposit, id)
+      window.localStorage.setItem(
+        STORAGE_KEYS.deposit,
+        JSON.stringify({ id, pickupToken })
+      )
     }
   }
 
@@ -96,6 +126,8 @@ export default function App() {
 
   const clearDepositId = () => {
     setLatestDepositId(null)
+    setLatestDepositPickupToken(null)
+    pickupMutation.reset()
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem(STORAGE_KEYS.deposit)
     }
@@ -105,6 +137,25 @@ export default function App() {
     setLatestWithdrawalId(null)
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem(STORAGE_KEYS.withdrawal)
+    }
+  }
+
+  const handleDepositPickup = () => {
+    if (!latestDepositId || !latestDepositPickupToken) {
+      return
+    }
+    pickupMutation.mutate({ id: latestDepositId, pickupToken: latestDepositPickupToken })
+  }
+
+  const handleDeliveryAddressChange = (value: string) => {
+    setDeliveryAddress(value)
+    if (typeof window === 'undefined') {
+      return
+    }
+    if (value) {
+      window.localStorage.setItem(STORAGE_KEYS.deliveryAddress, value)
+    } else {
+      window.localStorage.removeItem(STORAGE_KEYS.deliveryAddress)
     }
   }
 
@@ -130,6 +181,32 @@ export default function App() {
     refetchInterval: STATUS_REFRESH_MS,
   })
 
+  const pickupMutation = useMutation({
+    mutationFn: ({ id, pickupToken }: { id: string; pickupToken: string }) =>
+      pickupDeposit(id, pickupToken),
+    onSuccess: async (resp) => {
+      if (resp?.token) {
+        const copied = await copyTextWithFallback(resp.token)
+        if (copied) {
+          setMessage('Token revealed and copied to clipboard')
+        } else {
+          setMessage('Token revealed (copy failed, use the copy button)')
+        }
+      } else {
+        setMessage('Token revealed')
+      }
+      if (latestDepositId) {
+        queryClient.invalidateQueries({ queryKey: ['deposit', latestDepositId] })
+      }
+    },
+    onError: (err: unknown) => {
+      const normalized = normalizeError(err)
+      if (normalized) {
+        setMessage(normalized.message)
+      }
+    },
+  })
+
   const handleTokenChange = (value: string) => {
     setToken(value)
     const detected = detectTokenMint(value)
@@ -143,7 +220,7 @@ export default function App() {
     }
     const expectedMint = config.cashuMintUrl
     const isForeign = Boolean(expectedMint && detected.mintUrl !== expectedMint)
-    setTokenMintInfo({ mintUrl: detected.mintUrl, isForeign })
+    setTokenMintInfo({ mintUrl: detected.mintUrl, isForeign, amount: detected.amount })
   }
 
   const handleSubmit = async (evt: FormEvent<HTMLFormElement>) => {
@@ -163,24 +240,38 @@ export default function App() {
           metadata: { source: 'ui-proto' },
           delivery_hint: resolvedHint || undefined,
         }
-        const deposit = await createDeposit(payload)
-        rememberDepositId(deposit.id)
+        const creation = await createDeposit(payload)
+        rememberDeposit(creation.deposit.id, creation.pickup_token)
         setMessage(
-          `Deposit ${deposit.id} → ${deposit.address} (${deposit.state})`
+          `Deposit ${creation.deposit.id} → ${creation.deposit.address} (${creation.deposit.state})`
         )
       } else {
-        const payload: CreateWithdrawalRequest = {
-          amount_sats: Number(withdrawalAmount),
-          delivery_address: deliveryAddress.trim(),
+        let resolvedAmount = Number(withdrawalAmount)
+
+        if (withdrawalMethod === 'token') {
+          if (!tokenMintInfo || 'error' in tokenMintInfo) {
+            throw new Error('Paste a valid Cashu token before submitting')
+          }
+          resolvedAmount = tokenMintInfo.amount
+          if (resolvedAmount < config.withdrawalMinSats) {
+            throw new Error(
+              `Token value must be at least ${config.withdrawalMinSats.toLocaleString()} sats`
+            )
+          }
+        } else {
+          if (resolvedAmount <= 0 || Number.isNaN(resolvedAmount)) {
+            throw new Error('Withdrawal amount must be greater than zero')
+          }
+          if (resolvedAmount < config.withdrawalMinSats) {
+            throw new Error(
+              `Withdrawal amount must be at least ${config.withdrawalMinSats.toLocaleString()} sats`
+            )
+          }
         }
 
-        if (payload.amount_sats <= 0 || Number.isNaN(payload.amount_sats)) {
-          throw new Error('Withdrawal amount must be greater than zero')
-        }
-        if (payload.amount_sats < config.withdrawalMinSats) {
-          throw new Error(
-            `Withdrawal amount must be at least ${config.withdrawalMinSats.toLocaleString()} sats`
-          )
+        const payload: CreateWithdrawalRequest = {
+          amount_sats: resolvedAmount,
+          delivery_address: deliveryAddress.trim(),
         }
 
         if (withdrawalMethod === 'token') {
@@ -209,6 +300,17 @@ export default function App() {
       setSubmitting(false)
     }
   }
+
+  const withdrawalMinimum = config.withdrawalMinSats
+  const tokenBelowMinimum = Boolean(
+    tokenMintInfo &&
+      !('error' in tokenMintInfo) &&
+      tokenMintInfo.amount < withdrawalMinimum
+  )
+
+  const pickupError = pickupMutation.isError
+    ? normalizeError(pickupMutation.error)
+    : null
 
   return (
     <main className="app-shell">
@@ -309,19 +411,6 @@ export default function App() {
                 </>
               ) : (
                 <>
-                  <label>
-                    Amount (sats)
-                    <input
-                      type="number"
-                      min={config.withdrawalMinSats}
-                      value={withdrawalAmount}
-                      onChange={(e) => setWithdrawalAmount(e.target.value)}
-                      required
-                    />
-                    <span className="helper">
-                      Minimum {config.withdrawalMinSats.toLocaleString()} sats
-                    </span>
-                  </label>
                   <div className="method-toggle">
                     <span>Submission method</span>
                     <div className="method-options">
@@ -347,6 +436,21 @@ export default function App() {
                       </label>
                     </div>
                   </div>
+                  {withdrawalMethod === 'payment_request' && (
+                    <label>
+                      Amount (sats)
+                      <input
+                        type="number"
+                        min={config.withdrawalMinSats}
+                        value={withdrawalAmount}
+                        onChange={(e) => setWithdrawalAmount(e.target.value)}
+                        required={withdrawalMethod === 'payment_request'}
+                      />
+                      <span className="helper">
+                        Minimum {config.withdrawalMinSats.toLocaleString()} sats
+                      </span>
+                    </label>
+                  )}
                   {withdrawalMethod === 'token' ? (
                     <label>
                       Cashu token
@@ -362,11 +466,15 @@ export default function App() {
                           <span className="helper warning">{tokenMintInfo.error}</span>
                         ) : (
                           <span
-                            className={`helper ${tokenMintInfo.isForeign ? 'warning' : 'success'}`}
+                            className={`helper ${
+                              tokenMintInfo.isForeign || tokenBelowMinimum ? 'warning' : 'success'
+                            }`}
                           >
-                            {tokenMintInfo.isForeign
-                              ? `Foreign token detected (${tokenMintInfo.mintUrl}); will be swapped to the Shuestand mint first.`
-                              : `Mint detected: ${tokenMintInfo.mintUrl}`}
+                            {tokenBelowMinimum
+                              ? `Token value is ${tokenMintInfo.amount.toLocaleString()} sats, but withdrawals require at least ${withdrawalMinimum.toLocaleString()} sats.`
+                              : tokenMintInfo.isForeign
+                                ? `Foreign token detected (${tokenMintInfo.mintUrl}); will be swapped to the Shuestand mint first. Value: ${tokenMintInfo.amount.toLocaleString()} sats.`
+                                : `Mint detected: ${tokenMintInfo.mintUrl}. Value: ${tokenMintInfo.amount.toLocaleString()} sats.`}
                           </span>
                         ))}
                     </label>
@@ -381,7 +489,7 @@ export default function App() {
                     <input
                       type="text"
                       value={deliveryAddress}
-                      onChange={(e) => setDeliveryAddress(e.target.value)}
+                      onChange={(e) => handleDeliveryAddressChange(e.target.value)}
                       placeholder="bc1q..."
                       required
                     />
@@ -410,16 +518,12 @@ export default function App() {
                     error={normalizeError(depositError)}
                     isLoading={depositLoading}
                     hasSubmission={Boolean(latestDepositId)}
+                    pickupToken={latestDepositPickupToken}
+                    onPickup={handleDepositPickup}
+                    pickupPending={pickupMutation.isPending}
+                    pickupError={pickupError}
+                    onClear={clearDepositId}
                   />
-                  {latestDepositId && (
-                    <button
-                      type="button"
-                      className="link-button"
-                      onClick={clearDepositId}
-                    >
-                      Forget this deposit
-                    </button>
-                  )}
                 </>
               ) : (
                 <>
