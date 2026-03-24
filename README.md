@@ -115,6 +115,13 @@ shuestand/
     └── specs/
 ```
 
+## Docker deployment (preview)
+1. `cp infra/docker/backend.env.example infra/docker/backend.env` and fill in mainnet secrets (descriptors, mint URL, Esplora endpoint, wallet token, etc.).
+2. `docker compose -f infra/docker/docker-compose.yml up -d --build` to launch Postgres + backend + nginx-served frontend.
+3. Visit `http://localhost:8080` for the kiosk/operator UI; `/api` requests are reverse-proxied to the backend container.
+
+Once running, update `infra/docker/backend.env` whenever you rotate keys/policies and restart the backend service (`docker compose restart backend`).
+
 ## Development Notes
 - Rust nightly not required; stick to stable + Clippy + fmt in CI.
 - Frontend uses pnpm + TypeScript strict mode.
