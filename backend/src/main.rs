@@ -41,7 +41,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use urlencoding::encode as url_encode;
 
-const MIN_DEPOSIT_SATS: u64 = 100;
+const MIN_DEPOSIT_SATS: u64 = 50_000;
 const MAX_DEPOSIT_SATS: u64 = 2_000_000;
 const ADDRESS_POOL_REFILL_INTERVAL_SECS: u64 = 60;
 const ELECTRUM_RETRY: u8 = 5;

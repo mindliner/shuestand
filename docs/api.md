@@ -70,7 +70,7 @@ Represents Cashu → Bitcoin redemption via on-chain payout.
 Request body:
 ```json
 {
-  "amount_sats": 25000,
+  "amount_sats": 75000,
   "delivery_hint": "nut://app.minibits.cash/lnurldevice",
   "metadata": {
     "order_id": "np_12345",
@@ -136,7 +136,7 @@ Returns the withdrawal object including `txid`, `fee_paid_sats`, and `state` pro
 {
   "error": {
     "code": "validation_error",
-    "message": "amount_sats must be between 100 and 2,000,000"
+    "message": "amount_sats must be between 50,000 and 2,000,000"
   }
 }
 ```

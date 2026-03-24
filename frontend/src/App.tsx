@@ -33,7 +33,8 @@ type TokenMintInfo =
   | { mintUrl: string; isForeign: boolean; amount: number }
   | { error: string }
 
-const DEFAULT_AMOUNT = '5000'
+const DEFAULT_DEPOSIT_AMOUNT = config.depositMinSats.toString()
+const DEFAULT_WITHDRAWAL_AMOUNT = config.withdrawalMinSats.toString()
 const STATUS_REFRESH_MS = 5000
 
 const normalizeError = (err: unknown): Error | null => {
@@ -44,8 +45,8 @@ const normalizeError = (err: unknown): Error | null => {
 export default function App() {
   const [view, setView] = useState<ViewMode>('kiosk')
   const [flow, setFlow] = useState<Flow>('deposit')
-  const [depositAmount, setDepositAmount] = useState(DEFAULT_AMOUNT)
-  const [withdrawalAmount, setWithdrawalAmount] = useState(DEFAULT_AMOUNT)
+  const [depositAmount, setDepositAmount] = useState(DEFAULT_DEPOSIT_AMOUNT)
+  const [withdrawalAmount, setWithdrawalAmount] = useState(DEFAULT_WITHDRAWAL_AMOUNT)
   const [withdrawalMethod, setWithdrawalMethod] = useState<'token' | 'payment_request'>(
     'token'
   )
@@ -230,13 +231,19 @@ export default function App() {
 
     try {
       if (flow === 'deposit') {
+        const requestedAmount = Number(depositAmount)
+        if (!Number.isFinite(requestedAmount) || requestedAmount < config.depositMinSats) {
+          throw new Error(
+            `Deposit amount must be at least ${config.depositMinSats.toLocaleString()} sats`
+          )
+        }
         const selectedTarget = DELIVERY_TARGETS.find((target) => target.id === deliveryTarget)
         const resolvedHint =
           deliveryTarget === 'custom'
             ? customDeliveryHint.trim()
             : selectedTarget?.hint ?? null
         const payload = {
-          amount_sats: Number(depositAmount),
+          amount_sats: requestedAmount,
           metadata: { source: 'ui-proto' },
           delivery_hint: resolvedHint || undefined,
         }
@@ -372,11 +379,12 @@ export default function App() {
                     Amount (sats)
                     <input
                       type="number"
-                      min={1}
+                      min={config.depositMinSats}
                       value={depositAmount}
                       onChange={(e) => setDepositAmount(e.target.value)}
                       required
                     />
+                    <span className="helper">Minimum {config.depositMinSats.toLocaleString()} sats</span>
                   </label>
                   <label>
                     Delivery target (optional)
