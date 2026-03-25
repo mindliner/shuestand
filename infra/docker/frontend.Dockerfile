@@ -4,7 +4,7 @@ WORKDIR /app
 COPY frontend/package*.json ./
 RUN npm install
 COPY frontend ./
-ARG VITE_SHUESTAND_API_BASE=/api
+ARG VITE_SHUESTAND_API_BASE=
 ENV VITE_SHUESTAND_API_BASE=$VITE_SHUESTAND_API_BASE
 RUN npm run build
 

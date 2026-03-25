@@ -1,12 +1,10 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: shuestand
       POSTGRES_USER: shuestand
-      POSTGRES_PASSWORD: change-me
+      POSTGRES_PASSWORD: Wenaco.41hema
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -22,7 +20,7 @@ services:
     env_file:
       - backend.env
     environment:
-      DATABASE_URL: postgres://shuestand:change-me@postgres:5432/shuestand
+      DATABASE_URL: postgres://shuestand:Wenaco.41hema@postgres:5432/shuestand
     volumes:
       - cashu-data:/data/cashu
     depends_on:
@@ -37,7 +35,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "8080:80"
+      - "8872:80"
     restart: unless-stopped
 
 volumes:
