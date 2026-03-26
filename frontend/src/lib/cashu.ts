@@ -19,19 +19,24 @@ type TokenEntryLike = {
 
 type DecodedTokenLike = {
   mint?: string
+  proofs?: ProofLike[]
   token?: TokenEntryLike[]
 }
 
-const sumProofAmounts = (decoded: DecodedTokenLike | null): number => {
-  if (!decoded?.token?.length) return 0
-  return decoded.token.reduce((total, entry) => {
-    if (!entry?.proofs?.length) return total
-    const proofSum = entry.proofs.reduce((proofTotal, proof) => {
-      const value = Number(proof?.amount ?? 0)
-      return proofTotal + (Number.isFinite(value) ? value : 0)
-    }, 0)
-    return total + proofSum
+const sumProofList = (proofs?: ProofLike[]): number => {
+  if (!proofs?.length) return 0
+  return proofs.reduce((proofTotal, proof) => {
+    const value = Number(proof?.amount ?? 0)
+    return proofTotal + (Number.isFinite(value) ? value : 0)
   }, 0)
+}
+
+const sumProofAmounts = (decoded: DecodedTokenLike | null): number => {
+  if (!decoded) return 0
+  const nestedSum = decoded.token?.reduce((total, entry) => {
+    return total + sumProofList(entry?.proofs)
+  }, 0) ?? 0
+  return sumProofList(decoded.proofs) + nestedSum
 }
 
 const resolveMintUrl = (decoded: DecodedTokenLike | null): string | null => {
