@@ -8,7 +8,7 @@ use sqlx::{
     postgres::{PgPoolOptions, PgRow},
 };
 
-const DEPOSIT_SELECT_FIELDS: &str = "id, amount_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, minted_token, minted_amount_sats, token_ready_at, mint_attempt_count, last_mint_attempt_at, mint_error, delivery_attempt_count, last_delivery_attempt_at, delivery_error, pickup_token, pickup_revealed_at";
+const DEPOSIT_SELECT_FIELDS: &str = "id, amount_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, minted_token, minted_amount_sats, token_ready_at, mint_attempt_count, last_mint_attempt_at, mint_error, delivery_attempt_count, last_delivery_attempt_at, delivery_error, pickup_token, pickup_revealed_at, session_id";
 
 #[derive(Clone)]
 pub struct Database {
@@ -25,8 +25,8 @@ impl Database {
     pub async fn insert_deposit(&self, deposit: &Deposit) -> Result<(), Error> {
         sqlx::query(
             r#"INSERT INTO deposits
-            (id, amount_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, pickup_token, pickup_revealed_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
+            (id, amount_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, pickup_token, pickup_revealed_at, session_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#,
         )
         .bind(&deposit.id)
         .bind(deposit.amount_sats as i64)
@@ -42,6 +42,7 @@ impl Database {
         .bind(deposit.updated_at.to_rfc3339())
         .bind(&deposit.pickup_token)
         .bind(deposit.pickup_revealed_at.map(|ts| ts.to_rfc3339()))
+        .bind(deposit.session_id.as_deref())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -88,6 +89,7 @@ impl Database {
             created_at,
             updated_at,
             minted_token: minted_token.clone(),
+            session_id: decode_optional_string(&row, "session_id")?,
             pickup_token: row.try_get("pickup_token")?,
             pickup_revealed_at,
             token: match parsed_state {
@@ -108,8 +110,8 @@ impl Database {
     pub async fn insert_withdrawal(&self, withdrawal: &Withdrawal) -> Result<(), Error> {
         sqlx::query(
             r#"INSERT INTO withdrawals
-            (id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"#,
+            (id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at, session_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)"#,
         )
         .bind(&withdrawal.id)
         .bind(withdrawal.state.as_str())
@@ -136,6 +138,7 @@ impl Database {
                 .payment_request_fulfilled_at
                 .map(|ts| ts.to_rfc3339()),
         )
+        .bind(withdrawal.session_id.as_deref())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -143,7 +146,7 @@ impl Database {
 
     pub async fn fetch_withdrawal(&self, id: &str) -> Result<Withdrawal, Error> {
         let row = sqlx::query(
-            r#"SELECT id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at
+            r#"SELECT id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at, session_id
             FROM withdrawals WHERE id = $1"#,
         )
         .bind(id)
@@ -176,6 +179,7 @@ impl Database {
             created_at,
             updated_at,
             token_consumed: row.try_get::<bool, _>("token_consumed")?,
+            session_id: decode_optional_string(&row, "session_id")?,
             swap_fee_sats: decode_optional_i64(&row, "swap_fee_sats")?.map(|v| v as u64),
             payment_request_id: decode_optional_string(&row, "payment_request_id")?,
             payment_request_creq: decode_optional_string(&row, "payment_request_creq")?,
@@ -203,7 +207,7 @@ impl Database {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            r#"SELECT id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at
+            r#"SELECT id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at, session_id
             FROM withdrawals WHERE state IN ({}) ORDER BY created_at ASC"#,
             placeholders
         );
@@ -685,6 +689,64 @@ impl Database {
             })
             .collect()
     }
+
+    pub async fn create_session(&self, session: &Session) -> Result<(), Error> {
+        sqlx::query(
+            r#"INSERT INTO sessions (id, token_hash, created_at, last_seen_at, expires_at) VALUES ($1, $2, $3, $4, $5)"#,
+        )
+        .bind(&session.id)
+        .bind(&session.token_hash)
+        .bind(session.created_at.to_rfc3339())
+        .bind(session.last_seen_at.to_rfc3339())
+        .bind(session.expires_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn fetch_session_by_token_hash(&self, token_hash: &str) -> Result<Session, Error> {
+        let row = sqlx::query(
+            r#"SELECT id, token_hash, created_at, last_seen_at, expires_at FROM sessions WHERE token_hash = $1"#,
+        )
+        .bind(token_hash)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Self::map_session(row)
+    }
+
+    pub async fn touch_session(
+        &self,
+        id: &str,
+        last_seen_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), Error> {
+        sqlx::query(r#"UPDATE sessions SET last_seen_at = $2, expires_at = $3 WHERE id = $1"#)
+            .bind(id)
+            .bind(last_seen_at.to_rfc3339())
+            .bind(expires_at.to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_expired_sessions(&self, now: DateTime<Utc>) -> Result<u64, Error> {
+        let result = sqlx::query(r#"DELETE FROM sessions WHERE expires_at <= $1"#)
+            .bind(now.to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    fn map_session(row: PgRow) -> Result<Session, Error> {
+        Ok(Session {
+            id: row.try_get("id")?,
+            token_hash: row.try_get("token_hash")?,
+            created_at: parse_timestamp(row.try_get("created_at")?, "created_at")?,
+            last_seen_at: parse_timestamp(row.try_get("last_seen_at")?, "last_seen_at")?,
+            expires_at: parse_timestamp(row.try_get("expires_at")?, "expires_at")?,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -692,6 +754,15 @@ pub struct StateLiabilityRow {
     pub state: String,
     pub count: u64,
     pub amount_sats: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct Session {
+    pub id: String,
+    pub token_hash: String,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -758,6 +829,8 @@ pub struct Deposit {
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing)]
     pub minted_token: Option<String>,
+    #[serde(skip_serializing)]
+    pub session_id: Option<String>,
     #[serde(skip_serializing)]
     pub pickup_token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -845,6 +918,8 @@ pub struct Withdrawal {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub token_consumed: bool,
+    #[serde(skip_serializing)]
+    pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub swap_fee_sats: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

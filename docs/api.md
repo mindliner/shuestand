@@ -8,6 +8,12 @@ Base URL (dev): `http://localhost:8080`
 - Amounts are integers denominated in **satoshis**.
 - `delivery_hint` is an optional string that can hold either a Cashu wallet URL (`cashu://`, `nut://`) or an opaque label understood by upstream systems (e.g., upstream order or session IDs).
 
+### Work sessions
+- Kiosk clients SHOULD start or resume an anonymous work session before creating deposits/withdrawals.
+- `POST /api/v1/sessions` returns `{ session_id, token, claim_code, expires_at }`. The `token` must be echoed on every kiosk request via the `X-Shuestand-Session` header; the claim code is a four-block string users can jot down to resume.
+- `POST /api/v1/sessions/resume` accepts `{ "claim_code": "ABCD-EFGH-..." }` and returns the same payload as `start`, re-issuing the header token if the session is still active.
+- Deposits/withdrawals created with a session are only visible to callers presenting the matching `X-Shuestand-Session` header. Operator endpoints (guarded by `WALLET_API_TOKEN`) remain global.
+
 ## Entities
 
 ### Deposit
@@ -65,6 +71,31 @@ Represents Cashu → Bitcoin redemption via on-chain payout.
 - `failed` – error occurred (insufficient funds, invalid token, etc.).
 
 ## Endpoints
+
+### POST `/api/v1/sessions`
+Request body: _empty_.
+
+Response `200 OK`:
+```json
+{
+  "data": {
+    "session_id": "sess_01hy...",
+    "token": "st_d4f2...",
+    "claim_code": "ABCD-EFGH-IJKL-MNOP",
+    "expires_at": "2026-03-27T16:30:00Z"
+  }
+}
+```
+
+Clients must stash the `token` and send it as `X-Shuestand-Session` on every kiosk request; the claim code is a user-friendly representation for jotting down/resuming.
+
+### POST `/api/v1/sessions/resume`
+Request body:
+```json
+{ "claim_code": "ABCD-EFGH-IJKL-MNOP" }
+```
+
+Response mirrors the start endpoint, re-issuing the current token/expiry when the session is still valid.
 
 ### POST `/api/v1/deposits`
 Request body:

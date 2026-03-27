@@ -64,7 +64,7 @@ export const detectTokenMint = (rawToken: string): DetectedTokenMint => {
     }
     const amount = sumProofAmounts(decoded)
     if (!amount) {
-      return { error: 'Token does not contain any spendable proofs' }
+      return { error: 'Could not decode the token value (the backend will still validate it)' }
     }
     return { mintUrl, amount }
   } catch (err) {

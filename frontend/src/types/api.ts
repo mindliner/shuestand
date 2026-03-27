@@ -34,6 +34,7 @@ export type WithdrawalState =
   | 'confirming'
   | 'settled'
   | 'failed'
+  | 'archived_by_operator'
 
 export interface WithdrawalPaymentRequest {
   creq: string
@@ -95,6 +96,13 @@ export interface CreateDepositRequest {
 export interface DepositCreationResponse {
   deposit: Deposit
   pickup_token: string
+}
+
+export interface SessionStartResponse {
+  session_id: string
+  token: string
+  claim_code: string
+  expires_at: string
 }
 
 export interface DepositPickupResponse {

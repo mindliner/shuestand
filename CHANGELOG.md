@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-03-27
+- Added anonymous work-session support: `POST /api/v1/sessions` mints session IDs + hashed tokens, `/sessions/resume` reissues tokens from the four-block claim code, and every kiosk deposit/withdraw now tags its `session_id`.
+- Kiosk UI shows a session panel (start/resume/claim-code copy), stores tokens per-session, and automatically attaches `X-Shuestand-Session` on all kiosk API calls; local tracking lists are now namespaced per session so browsers can resume safely.
+- Same-browser resumes now rehydrate tracked deposits/withdrawals reliably and the operator panel calls those queues “Ongoing” instead of “Stuck.”
+
 ## 2026-03-24
 - Added per-deposit pickup tokens + resume codes so the kiosk halts before exposing a token and lets users/operators resume delivery later (with clipboard helpers baked into the reveal button).
 - Implemented webhook delivery for any `http(s)` delivery hint; successful callbacks auto-fulfill the deposit, failures are recorded so the flow falls back to manual pickup.

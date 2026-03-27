@@ -494,7 +494,7 @@ export function OperatorPanel() {
 
           <section className="operator-card">
             <div className="operator-card-header">
-              <h3>Stuck withdrawals</h3>
+              <h3>Ongoing withdrawals</h3>
               <button type="button" onClick={() => cleanupQuery.refetch()} disabled={cleanupQuery.isFetching}>
                 Refresh
               </button>
@@ -609,7 +609,7 @@ export function OperatorPanel() {
 
           <section className="operator-card">
             <div className="operator-card-header">
-              <h3>Stuck deposits</h3>
+              <h3>Ongoing deposits</h3>
               <button
                 type="button"
                 onClick={() => depositCleanupQuery.refetch()}

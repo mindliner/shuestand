@@ -10,14 +10,16 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
+use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{borrow::ToOwned, fs, sync::Arc, time::Instant};
 use uuid::Uuid;
 
 use crate::AppState;
 use backend::cashu::{TokenMintError, token_mint_url, token_total_amount};
-use backend::db::{Deposit, DepositState, StateLiabilityRow, Withdrawal, WithdrawalState};
+use backend::db::{Deposit, DepositState, Session, StateLiabilityRow, Withdrawal, WithdrawalState};
 use backend::onchain::{OnchainBalance, OnchainWallet};
 use backend::wallet::WalletHandle;
 use cdk::Amount;
@@ -30,6 +32,11 @@ use urlencoding::encode;
 type ApiResult<T> = Result<Json<ApiResponse<T>>, (StatusCode, Json<ApiError>)>;
 const WALLET_TOPUP_LABEL: &str = "Shuestand hot wallet top-up";
 const PAYMENT_REQUEST_TTL_SECS: i64 = 300;
+const SESSION_HEADER: &str = "x-shuestand-session";
+const SESSION_TOKEN_PREFIX: &str = "st_";
+const SESSION_TOKEN_BYTES: usize = 16;
+const SESSION_TOKEN_HEX_LEN: usize = SESSION_TOKEN_BYTES * 2;
+const SESSION_CLAIM_GROUP_LEN: usize = 8;
 
 const DEFAULT_OPERATOR_WITHDRAWAL_LIMIT: usize = 50;
 const DEFAULT_WITHDRAWAL_STATES: [WithdrawalState; 5] = [
@@ -52,6 +59,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthcheck))
         .route("/metrics", get(export_metrics))
+        .route("/api/v1/sessions", post(start_session))
+        .route("/api/v1/sessions/resume", post(resume_session))
         .route("/api/v1/deposits", post(create_deposit))
         .route("/api/v1/deposits/:id", get(get_deposit))
         .route("/api/v1/deposits/:id/pickup", post(pickup_deposit))
@@ -117,6 +126,21 @@ struct DepositCreateResponse {
     deposit: Deposit,
     pickup_token: String,
 }
+
+#[derive(Serialize)]
+struct SessionStartResponse {
+    session_id: String,
+    token: String,
+    claim_code: String,
+    expires_at: String,
+}
+
+#[derive(Deserialize)]
+struct SessionResumeRequest {
+    claim_code: String,
+}
+
+type SessionResumeResponse = SessionStartResponse;
 
 #[derive(Deserialize, Debug)]
 struct WithdrawalRequest {
@@ -515,8 +539,86 @@ async fn export_metrics(State(state): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, headers, state.metrics.encode())
 }
 
+async fn start_session(State(state): State<AppState>) -> ApiResult<SessionStartResponse> {
+    let now = Utc::now();
+    let expires_at = now + state.session_ttl;
+    let (token, claim_code) = generate_session_token();
+    let session = Session {
+        id: format!("sess_{}", Uuid::new_v4()),
+        token_hash: hash_session_token(&token),
+        created_at: now,
+        last_seen_at: now,
+        expires_at,
+    };
+
+    if let Err(err) = state.db.delete_expired_sessions(now).await {
+        tracing::warn!(target: "backend", error = %err, "failed to purge expired sessions");
+    }
+
+    state
+        .db
+        .create_session(&session)
+        .await
+        .map_err(server_error)?;
+
+    Ok(Json(ApiResponse {
+        data: SessionStartResponse {
+            session_id: session.id,
+            token,
+            claim_code,
+            expires_at: expires_at.to_rfc3339(),
+        },
+    }))
+}
+
+async fn resume_session(
+    State(state): State<AppState>,
+    Json(req): Json<SessionResumeRequest>,
+) -> ApiResult<SessionResumeResponse> {
+    let now = Utc::now();
+    if let Err(err) = state.db.delete_expired_sessions(now).await {
+        tracing::warn!(target: "backend", error = %err, "failed to purge expired sessions");
+    }
+
+    let normalized = match normalize_claim_code(&req.claim_code) {
+        Some(payload) => payload,
+        None => return Err(invalid_request("invalid_claim_code")),
+    };
+    let token = format!("{}{}", SESSION_TOKEN_PREFIX, normalized);
+    let token_hash = hash_session_token(&token);
+
+    let mut session = match state.db.fetch_session_by_token_hash(&token_hash).await {
+        Ok(sess) => sess,
+        Err(sqlx::Error::RowNotFound) => return Err(invalid_request("invalid_claim_code")),
+        Err(err) => return Err(server_error(err)),
+    };
+
+    if session.expires_at < now {
+        return Err(invalid_request("session_expired"));
+    }
+
+    let new_expiry = now + state.session_ttl;
+    state
+        .db
+        .touch_session(&session.id, now, new_expiry)
+        .await
+        .map_err(server_error)?;
+    session.last_seen_at = now;
+    session.expires_at = new_expiry;
+
+    Ok(Json(ApiResponse {
+        data: SessionStartResponse {
+            session_id: session.id,
+            token,
+            claim_code: claim_code_from_token_payload(&normalized),
+            expires_at: new_expiry.to_rfc3339(),
+        },
+    }))
+}
+
 async fn create_deposit(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<DepositRequest>,
 ) -> ApiResult<DepositCreateResponse> {
     const MIN_DEPOSIT_SATS: u64 = super::MIN_DEPOSIT_SATS;
@@ -555,6 +657,8 @@ async fn create_deposit(
         )));
     }
 
+    let session = resolve_session_from_headers(&state, &headers).await?;
+
     let id = format!("dep_{}", Uuid::new_v4());
     let assigned = state
         .address_pool
@@ -579,6 +683,7 @@ async fn create_deposit(
         created_at: now,
         updated_at: now,
         minted_token: None,
+        session_id: session.as_ref().map(|sess| sess.id.clone()),
         pickup_token: pickup_token.clone(),
         pickup_revealed_at: None,
         token: None,
@@ -606,12 +711,21 @@ async fn create_deposit(
     }))
 }
 
-async fn get_deposit(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Deposit> {
-    match state.db.fetch_deposit(&id).await {
-        Ok(dep) => Ok(Json(ApiResponse { data: dep })),
-        Err(sqlx::Error::RowNotFound) => Err(not_found("deposit_not_found")),
-        Err(err) => Err(server_error(err)),
-    }
+async fn get_deposit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Deposit> {
+    let session = resolve_session_from_headers(&state, &headers).await?;
+    let deposit = match state.db.fetch_deposit(&id).await {
+        Ok(dep) => dep,
+        Err(sqlx::Error::RowNotFound) => return Err(not_found("deposit_not_found")),
+        Err(err) => return Err(server_error(err)),
+    };
+
+    ensure_session_access(deposit.session_id.as_deref(), session.as_ref())?;
+
+    Ok(Json(ApiResponse { data: deposit }))
 }
 
 async fn pickup_deposit(
@@ -692,6 +806,8 @@ async fn request_withdrawal(
         ));
     }
 
+    let session = resolve_session_from_headers(&state, &headers).await?;
+
     let available_onchain = match state.onchain_wallet.as_ref() {
         Some(wallet) => {
             let summary = wallet.balance().await.map_err(server_error)?;
@@ -738,6 +854,7 @@ async fn request_withdrawal(
         created_at: now,
         updated_at: now,
         token_consumed: false,
+        session_id: session.as_ref().map(|sess| sess.id.clone()),
         swap_fee_sats: None,
         payment_request_id: None,
         payment_request_creq: None,
@@ -804,15 +921,21 @@ async fn request_withdrawal(
 
 async fn get_withdrawal(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<WithdrawalView> {
-    match state.db.fetch_withdrawal(&id).await {
-        Ok(wd) => Ok(Json(ApiResponse {
-            data: WithdrawalView::new(wd, state.cashu_mint_url.as_deref(), None),
-        })),
-        Err(sqlx::Error::RowNotFound) => Err(not_found("withdrawal_not_found")),
-        Err(err) => Err(server_error(err)),
-    }
+    let session = resolve_session_from_headers(&state, &headers).await?;
+    let withdrawal = match state.db.fetch_withdrawal(&id).await {
+        Ok(wd) => wd,
+        Err(sqlx::Error::RowNotFound) => return Err(not_found("withdrawal_not_found")),
+        Err(err) => return Err(server_error(err)),
+    };
+
+    ensure_session_access(withdrawal.session_id.as_deref(), session.as_ref())?;
+
+    Ok(Json(ApiResponse {
+        data: WithdrawalView::new(withdrawal, state.cashu_mint_url.as_deref(), None),
+    }))
 }
 
 async fn submit_payment_request(
@@ -1893,6 +2016,140 @@ fn map_quote_response(quote: MintQuote) -> CashuInvoiceStatusResponse {
         state: mint_state_label(state).to_string(),
         expires_at: expiry,
     }
+}
+
+async fn resolve_session_from_headers(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<Session>, (StatusCode, Json<ApiError>)> {
+    let value = match headers.get(SESSION_HEADER) {
+        Some(val) => val,
+        None => return Ok(None),
+    };
+
+    let token_str = value
+        .to_str()
+        .map_err(|_| unauthorized_session("session_invalid"))?;
+    let normalized = match normalize_session_token(token_str) {
+        Some(token) => token,
+        None => return Err(unauthorized_session("session_invalid")),
+    };
+
+    let now = Utc::now();
+    let token_hash = hash_session_token(&normalized);
+    let mut session = match state.db.fetch_session_by_token_hash(&token_hash).await {
+        Ok(sess) => sess,
+        Err(sqlx::Error::RowNotFound) => return Err(unauthorized_session("session_invalid")),
+        Err(err) => return Err(server_error(err)),
+    };
+
+    if session.expires_at < now {
+        return Err(unauthorized_session("session_expired"));
+    }
+
+    let new_expiry = now + state.session_ttl;
+    if let Err(err) = state.db.touch_session(&session.id, now, new_expiry).await {
+        tracing::warn!(
+            target: "backend",
+            error = %err,
+            session_id = %session.id,
+            "failed to refresh session timestamps"
+        );
+    } else {
+        session.last_seen_at = now;
+        session.expires_at = new_expiry;
+    }
+
+    Ok(Some(session))
+}
+
+fn generate_session_token() -> (String, String) {
+    let mut bytes = [0u8; SESSION_TOKEN_BYTES];
+    OsRng.fill_bytes(&mut bytes);
+    let payload = hex::encode(bytes);
+    let token = format!("{}{}", SESSION_TOKEN_PREFIX, payload);
+    let claim_code = claim_code_from_token_payload(&payload);
+    (token, claim_code)
+}
+
+fn claim_code_from_token_payload(payload: &str) -> String {
+    let upper = payload.to_uppercase();
+    upper
+        .chars()
+        .collect::<Vec<_>>()
+        .chunks(SESSION_CLAIM_GROUP_LEN)
+        .map(|chunk| chunk.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn normalize_session_token(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let payload = trimmed.strip_prefix(SESSION_TOKEN_PREFIX)?;
+    if payload.len() != SESSION_TOKEN_HEX_LEN {
+        return None;
+    }
+    if !payload.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!(
+        "{}{}",
+        SESSION_TOKEN_PREFIX,
+        payload.to_ascii_lowercase()
+    ))
+}
+
+fn normalize_claim_code(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    let without_prefix = trimmed
+        .strip_prefix(SESSION_TOKEN_PREFIX)
+        .unwrap_or(trimmed);
+    let mut filtered = String::with_capacity(SESSION_TOKEN_HEX_LEN);
+    for ch in without_prefix.chars() {
+        if ch == '-' || ch.is_whitespace() {
+            continue;
+        }
+        if ch.is_ascii_hexdigit() {
+            filtered.push(ch.to_ascii_lowercase());
+        } else {
+            return None;
+        }
+    }
+    if filtered.len() != SESSION_TOKEN_HEX_LEN {
+        return None;
+    }
+    Some(filtered)
+}
+
+fn hash_session_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn ensure_session_access(
+    owner_session: Option<&str>,
+    current: Option<&Session>,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if let Some(expected) = owner_session {
+        let Some(active) = current else {
+            return Err(unauthorized_session("session_required"));
+        };
+        if active.id != expected {
+            return Err(unauthorized_session("session_mismatch"));
+        }
+    }
+    Ok(())
+}
+
+fn unauthorized_session(code: &'static str) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ApiError {
+            code,
+            message: "invalid or expired session token".into(),
+        }),
+    )
 }
 
 fn map_token_error(err: TokenMintError) -> (StatusCode, Json<ApiError>) {

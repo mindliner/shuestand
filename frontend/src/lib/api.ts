@@ -6,6 +6,7 @@ import type {
   CreateWithdrawalRequest,
   Deposit,
   DepositCreationResponse,
+  SessionStartResponse,
   DepositPickupResponse,
   WalletBalanceResponse,
   WalletSendRequest,
@@ -32,6 +33,11 @@ const JSON_HEADERS = {
 const jsonHeaders = (token?: string) => ({
   ...JSON_HEADERS,
   ...(token ? { Authorization: `Bearer ${token}` } : {}),
+})
+
+const sessionHeaders = (token?: string) => ({
+  ...JSON_HEADERS,
+  ...(token ? { 'X-Shuestand-Session': token } : {}),
 })
 
 export class ApiClientError extends Error {
@@ -99,41 +105,65 @@ function normalizeApiError(payload: unknown): ApiError | undefined {
   return undefined
 }
 
-export function createDeposit(payload: CreateDepositRequest): Promise<DepositCreationResponse> {
+export function createDeposit(
+  payload: CreateDepositRequest,
+  sessionToken?: string,
+): Promise<DepositCreationResponse> {
   return request<DepositCreationResponse>('/api/v1/deposits', {
     method: 'POST',
-    headers: JSON_HEADERS,
+    headers: sessionHeaders(sessionToken),
     body: JSON.stringify(payload),
   })
 }
 
 export function createWithdrawal(
-  payload: CreateWithdrawalRequest
+  payload: CreateWithdrawalRequest,
+  sessionToken?: string,
 ): Promise<Withdrawal> {
   return request<Withdrawal>('/api/v1/withdrawals', {
     method: 'POST',
-    headers: JSON_HEADERS,
+    headers: sessionHeaders(sessionToken),
     body: JSON.stringify(payload),
   })
 }
 
-export function getDeposit(id: string): Promise<Deposit> {
-  return request<Deposit>(`/api/v1/deposits/${encodeURIComponent(id)}`)
+export function getDeposit(id: string, sessionToken?: string): Promise<Deposit> {
+  return request<Deposit>(`/api/v1/deposits/${encodeURIComponent(id)}`, {
+    headers: sessionHeaders(sessionToken),
+  })
 }
 
 export function pickupDeposit(
   id: string,
   pickupToken: string,
+  sessionToken?: string,
 ): Promise<DepositPickupResponse> {
   return request<DepositPickupResponse>(`/api/v1/deposits/${encodeURIComponent(id)}/pickup`, {
     method: 'POST',
-    headers: JSON_HEADERS,
+    headers: sessionHeaders(sessionToken),
     body: JSON.stringify({ pickup_token: pickupToken }),
   })
 }
 
-export function getWithdrawal(id: string): Promise<Withdrawal> {
-  return request<Withdrawal>(`/api/v1/withdrawals/${encodeURIComponent(id)}`)
+export function getWithdrawal(id: string, sessionToken?: string): Promise<Withdrawal> {
+  return request<Withdrawal>(`/api/v1/withdrawals/${encodeURIComponent(id)}`, {
+    headers: sessionHeaders(sessionToken),
+  })
+}
+
+export function startSession(): Promise<SessionStartResponse> {
+  return request<SessionStartResponse>('/api/v1/sessions', {
+    method: 'POST',
+    headers: JSON_HEADERS,
+  })
+}
+
+export function resumeSession(claimCode: string): Promise<SessionStartResponse> {
+  return request<SessionStartResponse>('/api/v1/sessions/resume', {
+    method: 'POST',
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ claim_code: claimCode }),
+  })
 }
 
 export function getWalletBalance(token: string): Promise<WalletBalanceResponse> {

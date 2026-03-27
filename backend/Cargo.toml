@@ -29,6 +29,8 @@ rand = "0.8"
 prometheus-client = "0.22"
 serde_cbor = "0.11"
 base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
 
 [patch.crates-io]
 sqlx-sqlite = { path = "../vendor/sqlx-sqlite-0.7.4" }

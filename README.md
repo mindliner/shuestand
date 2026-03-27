@@ -24,6 +24,12 @@ Shuestand lets users fund a Cashu wallet from on-chain Bitcoin or withdraw sats 
    - Funds are redeemed at the mint, credited to our float, and the backend crafts/broadcasts an on-chain payout from the hot wallet (no Lightning dependency).
    - UI shows progress, payout txid + confirmations, and an audit trail for operators.
 
+### Work sessions & claim codes
+- Every kiosk browser runs inside an anonymous work session. Click “Start session” to mint a session token + four-block claim code; the token is kept in `sessionStorage` and attached to all `/api/v1/deposits|withdrawals` calls as `X-Shuestand-Session`.
+- The claim code is the human-friendly representation of that token. Jot it down or export the QR so you can resume later (same browser = instant restore, different browser = re-enter any dep/wd IDs you care about until we ship the session inbox).
+- Ending a session immediately pauses polling but does **not** cancel deposits/withdrawals. Resuming with the claim code rehydrates the tracked IDs on that browser profile and picks up status polling right where you left off.
+- Operator view continues to see all deposits/withdrawals regardless of session and can help a guest recover an ID if needed.
+
 ## System Architecture
 - **Frontend** (React + Vite): dual-pane interface, live status toasts, QR helpers, token import/export modal, activity log.
 - **Gateway API** (Rust / Axum):
@@ -118,7 +124,8 @@ shuestand/
 ## Docker deployment (preview)
 1. `cp infra/docker/backend.env.example infra/docker/backend.env` and fill in mainnet secrets (descriptors, mint URL, Esplora endpoint, wallet token, etc.).
 2. `docker compose -f infra/docker/docker-compose.yml up -d --build` to launch Postgres + backend + nginx-served frontend.
-3. Visit `http://localhost:8080` for the kiosk/operator UI; `/api` requests are reverse-proxied to the backend container.
+3. Apply the database schema inside the backend container once: `docker compose run --rm backend sqlx migrate run`.
+4. Visit `http://localhost:8080` for the kiosk/operator UI; `/api` requests are reverse-proxied to the backend container.
 
 Once running, update `infra/docker/backend.env` whenever you rotate keys/policies and restart the backend service (`docker compose restart backend`).
 

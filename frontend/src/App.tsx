@@ -2,8 +2,11 @@ import type { FormEvent } from 'react'
 import { useEffect, useState } from 'react'
 
 const STORAGE_KEYS = {
-  deposit: 'shuestand.latestDepositId',
-  withdrawal: 'shuestand.latestWithdrawalId',
+  session: 'shuestand.session',
+  deposits: 'shuestand.deposits',
+  withdrawals: 'shuestand.withdrawals',
+  legacyDeposit: 'shuestand.latestDepositId',
+  legacyWithdrawal: 'shuestand.latestWithdrawalId',
   deliveryAddress: 'shuestand.latestDeliveryAddress',
 }
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -12,7 +15,7 @@ import { config } from './config'
 import { copyTextWithFallback } from './lib/clipboard'
 import { DELIVERY_TARGETS } from './config/deliveryTargets'
 import { detectTokenMint } from './lib/cashu'
-import type { CreateWithdrawalRequest } from './types/api'
+import type { CreateWithdrawalRequest, SessionStartResponse } from './types/api'
 import {
   ApiClientError,
   createDeposit,
@@ -20,6 +23,8 @@ import {
   getDeposit,
   getWithdrawal,
   pickupDeposit,
+  startSession,
+  resumeSession,
 } from './lib/api'
 import {
   DepositStatusCard,
@@ -32,6 +37,14 @@ type ViewMode = 'kiosk' | 'operator'
 type TokenMintInfo =
   | { mintUrl: string; isForeign: boolean; amount: number }
   | { error: string }
+type StoredDeposit = { id: string; pickupToken?: string | null }
+type StoredWithdrawal = { id: string }
+type SessionInfo = {
+  id: string
+  token: string
+  claimCode: string
+  expiresAt: string
+}
 
 const DEFAULT_DEPOSIT_AMOUNT = config.depositMinSats.toString()
 const DEFAULT_WITHDRAWAL_AMOUNT = config.withdrawalMinSats.toString()
@@ -57,49 +70,241 @@ export default function App() {
   const [deliveryAddress, setDeliveryAddress] = useState('')
   const [isSubmitting, setSubmitting] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
-  const [latestDepositId, setLatestDepositId] = useState<string | null>(null)
-  const [latestDepositPickupToken, setLatestDepositPickupToken] = useState<string | null>(null)
-  const [latestWithdrawalId, setLatestWithdrawalId] = useState<string | null>(
-    null
-  )
+  const [deposits, setDeposits] = useState<StoredDeposit[]>([])
+  const [selectedDepositId, setSelectedDepositId] = useState<string | null>(null)
+  const [withdrawals, setWithdrawals] = useState<StoredWithdrawal[]>([])
+  const [selectedWithdrawalId, setSelectedWithdrawalId] = useState<string | null>(null)
+  const [session, setSession] = useState<SessionInfo | null>(null)
+  const [sessionBusy, setSessionBusy] = useState(false)
+  const [resumeCode, setResumeCode] = useState('')
+
+  const scopedKey = (base: string, sessionId: string) => `${base}.${sessionId}`
+
+  const persistDeposits = (entries: StoredDeposit[], sessionId?: string) => {
+    if (typeof window === 'undefined' || !sessionId) {
+      return
+    }
+    window.localStorage.setItem(scopedKey(STORAGE_KEYS.deposits, sessionId), JSON.stringify(entries))
+  }
+
+  const persistWithdrawals = (entries: StoredWithdrawal[], sessionId?: string) => {
+    if (typeof window === 'undefined' || !sessionId) {
+      return
+    }
+    window.localStorage.setItem(scopedKey(STORAGE_KEYS.withdrawals, sessionId), JSON.stringify(entries))
+  }
+
+  const storeSessionInfo = (info: SessionInfo | null) => {
+    if (typeof window === 'undefined') {
+      return
+    }
+    if (info) {
+      window.sessionStorage.setItem(STORAGE_KEYS.session, JSON.stringify(info))
+    } else {
+      window.sessionStorage.removeItem(STORAGE_KEYS.session)
+    }
+  }
+
+  const resetTrackingState = () => {
+    setDeposits([])
+    setSelectedDepositId(null)
+    setWithdrawals([])
+    setSelectedWithdrawalId(null)
+  }
+
+  const applySessionPayload = (payload: SessionStartResponse) => {
+    const info: SessionInfo = {
+      id: payload.session_id,
+      token: payload.token,
+      claimCode: payload.claim_code,
+      expiresAt: payload.expires_at,
+    }
+    resetTrackingState()
+    setSession(info)
+    storeSessionInfo(info)
+  }
+
+  const dropSession = (notice?: string) => {
+    storeSessionInfo(null)
+    setSession(null)
+    resetTrackingState()
+    setResumeCode('')
+    if (notice) {
+      setMessage(notice)
+    }
+  }
+
+  const SESSION_ERROR_CODES = new Set(['session_invalid', 'session_expired', 'session_required'])
+
+  const maybeHandleSessionAuthError = (err: unknown) => {
+    if (err instanceof ApiClientError && err.code && SESSION_ERROR_CODES.has(err.code)) {
+      dropSession('Session expired or invalid. Start a new one to keep working.')
+      return true
+    }
+    return false
+  }
 
   const queryClient = useQueryClient()
+  const sessionToken = session?.token ?? null
 
   useEffect(() => {
     if (typeof window === 'undefined') {
       return
     }
-    const storedDeposit = window.localStorage.getItem(STORAGE_KEYS.deposit)
-    if (storedDeposit) {
+    const rawSession = window.sessionStorage.getItem(STORAGE_KEYS.session)
+    if (rawSession) {
       try {
-        const parsed = JSON.parse(storedDeposit)
-        if (parsed && typeof parsed === 'object' && typeof parsed.id === 'string') {
-          setLatestDepositId(parsed.id)
-          if (typeof parsed.pickupToken === 'string') {
-            setLatestDepositPickupToken(parsed.pickupToken)
-          } else {
-            setLatestDepositPickupToken(null)
-          }
-        } else {
-          setLatestDepositId(storedDeposit)
-          setLatestDepositPickupToken(null)
+        const parsed = JSON.parse(rawSession)
+        if (parsed && typeof parsed === 'object' && typeof parsed.id === 'string' && typeof parsed.token === 'string') {
+          setSession({
+            id: parsed.id,
+            token: parsed.token,
+            claimCode: parsed.claimCode ?? parsed.claim_code ?? '',
+            expiresAt: parsed.expiresAt ?? parsed.expires_at ?? '',
+          })
         }
       } catch {
-        setLatestDepositId(storedDeposit)
-        setLatestDepositPickupToken(null)
+        /* ignore */
       }
     }
-    const storedWithdrawal = window.localStorage.getItem(STORAGE_KEYS.withdrawal)
-    if (storedWithdrawal) {
-      setLatestWithdrawalId(storedWithdrawal)
-    }
-    const storedDeliveryAddress = window.localStorage.getItem(
-      STORAGE_KEYS.deliveryAddress
-    )
+    const storedDeliveryAddress = window.localStorage.getItem(STORAGE_KEYS.deliveryAddress)
     if (storedDeliveryAddress) {
       setDeliveryAddress(storedDeliveryAddress)
     }
   }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+    if (!session?.id) {
+      resetTrackingState()
+      return
+    }
+
+    const hydrateDeposits = () => {
+      if (!session?.id) {
+        return
+      }
+      let parsed: StoredDeposit[] = []
+      const key = scopedKey(STORAGE_KEYS.deposits, session.id)
+      const raw = window.localStorage.getItem(key)
+      if (raw) {
+        try {
+          const json = JSON.parse(raw)
+          if (Array.isArray(json)) {
+            parsed = json
+              .filter((entry): entry is StoredDeposit => typeof entry?.id === 'string')
+              .map((entry) => ({ id: entry.id, pickupToken: entry.pickupToken ?? null }))
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!parsed.length) {
+        const legacyKey = window.localStorage.getItem(STORAGE_KEYS.deposits)
+        if (legacyKey) {
+          try {
+            const legacyParsed = JSON.parse(legacyKey)
+            if (Array.isArray(legacyParsed)) {
+              parsed = legacyParsed
+                .filter((entry): entry is StoredDeposit => typeof entry?.id === 'string')
+                .map((entry) => ({ id: entry.id, pickupToken: entry.pickupToken ?? null }))
+            }
+          } catch {
+            /* ignore */
+          }
+          if (parsed.length) {
+            persistDeposits(parsed, session.id)
+            window.localStorage.removeItem(STORAGE_KEYS.deposits)
+          }
+        }
+      }
+      if (!parsed.length) {
+        const legacy = window.localStorage.getItem(STORAGE_KEYS.legacyDeposit)
+        if (legacy) {
+          try {
+            const legacyParsed = JSON.parse(legacy)
+            if (legacyParsed && typeof legacyParsed === 'object' && typeof legacyParsed.id === 'string') {
+              parsed = [{ id: legacyParsed.id, pickupToken: legacyParsed.pickupToken ?? null }]
+            } else {
+              parsed = [{ id: legacy }]
+            }
+          } catch {
+            parsed = [{ id: legacy }]
+          }
+          window.localStorage.removeItem(STORAGE_KEYS.legacyDeposit)
+        }
+      }
+      if (parsed.length) {
+        persistDeposits(parsed, session.id)
+      }
+      setDeposits(parsed)
+      setSelectedDepositId((current) => {
+        if (current && parsed.some((entry) => entry.id === current)) {
+          return current
+        }
+        return parsed[0]?.id ?? null
+      })
+    }
+
+    const hydrateWithdrawals = () => {
+      if (!session?.id) {
+        return
+      }
+      let parsed: StoredWithdrawal[] = []
+      const key = scopedKey(STORAGE_KEYS.withdrawals, session.id)
+      const raw = window.localStorage.getItem(key)
+      if (raw) {
+        try {
+          const json = JSON.parse(raw)
+          if (Array.isArray(json)) {
+            parsed = json.filter((entry): entry is StoredWithdrawal => typeof entry?.id === 'string')
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!parsed.length) {
+        const legacyKey = window.localStorage.getItem(STORAGE_KEYS.withdrawals)
+        if (legacyKey) {
+          try {
+            const legacyParsed = JSON.parse(legacyKey)
+            if (Array.isArray(legacyParsed)) {
+              parsed = legacyParsed.filter((entry): entry is StoredWithdrawal => typeof entry?.id === 'string')
+            }
+          } catch {
+            /* ignore */
+          }
+          if (parsed.length) {
+            persistWithdrawals(parsed, session.id)
+            window.localStorage.removeItem(STORAGE_KEYS.withdrawals)
+          }
+        }
+      }
+      if (!parsed.length) {
+        const legacy = window.localStorage.getItem(STORAGE_KEYS.legacyWithdrawal)
+        if (legacy) {
+          parsed = [{ id: legacy }]
+          window.localStorage.removeItem(STORAGE_KEYS.legacyWithdrawal)
+        }
+      }
+      if (parsed.length) {
+        persistWithdrawals(parsed, session.id)
+      }
+      setWithdrawals(parsed)
+      setSelectedWithdrawalId((current) => {
+        if (current && parsed.some((entry) => entry.id === current)) {
+          return current
+        }
+        return parsed[0]?.id ?? null
+      })
+    }
+
+    hydrateDeposits()
+    hydrateWithdrawals()
+
+  }, [session])
 
   useEffect(() => {
     if (flow !== 'withdrawal') {
@@ -108,44 +313,67 @@ export default function App() {
   }, [flow])
 
   const rememberDeposit = (id: string, pickupToken: string) => {
-    setLatestDepositId(id)
-    setLatestDepositPickupToken(pickupToken)
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(
-        STORAGE_KEYS.deposit,
-        JSON.stringify({ id, pickupToken })
-      )
+    if (!session?.id) {
+      return
     }
+    setDeposits((current) => {
+      const next = [{ id, pickupToken }, ...current.filter((entry) => entry.id !== id)]
+      persistDeposits(next, session.id)
+      return next
+    })
+    setSelectedDepositId(id)
   }
 
   const rememberWithdrawalId = (id: string) => {
-    setLatestWithdrawalId(id)
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(STORAGE_KEYS.withdrawal, id)
+    if (!session?.id) {
+      return
     }
+    setWithdrawals((current) => {
+      const next = [{ id }, ...current.filter((entry) => entry.id !== id)]
+      persistWithdrawals(next, session.id)
+      return next
+    })
+    setSelectedWithdrawalId(id)
   }
 
   const clearDepositId = () => {
-    setLatestDepositId(null)
-    setLatestDepositPickupToken(null)
-    pickupMutation.reset()
-    if (typeof window !== 'undefined') {
-      window.localStorage.removeItem(STORAGE_KEYS.deposit)
+    if (!selectedDepositId) {
+      return
     }
+    pickupMutation.reset()
+    setDeposits((current) => {
+      const next = current.filter((entry) => entry.id !== selectedDepositId)
+      persistDeposits(next, session?.id)
+      setSelectedDepositId(next[0]?.id ?? null)
+      return next
+    })
   }
 
   const clearWithdrawalId = () => {
-    setLatestWithdrawalId(null)
-    if (typeof window !== 'undefined') {
-      window.localStorage.removeItem(STORAGE_KEYS.withdrawal)
+    if (!selectedWithdrawalId) {
+      return
     }
+    setWithdrawals((current) => {
+      const next = current.filter((entry) => entry.id !== selectedWithdrawalId)
+      persistWithdrawals(next, session?.id)
+      setSelectedWithdrawalId(next[0]?.id ?? null)
+      return next
+    })
   }
 
   const handleDepositPickup = () => {
-    if (!latestDepositId || !latestDepositPickupToken) {
+    if (!selectedDepositId) {
       return
     }
-    pickupMutation.mutate({ id: latestDepositId, pickupToken: latestDepositPickupToken })
+    if (!sessionToken) {
+      setMessage('Start or resume a session before revealing tokens.')
+      return
+    }
+    const selected = deposits.find((entry) => entry.id === selectedDepositId)
+    if (!selected?.pickupToken) {
+      return
+    }
+    pickupMutation.mutate({ id: selectedDepositId, pickupToken: selected.pickupToken })
   }
 
   const handleDeliveryAddressChange = (value: string) => {
@@ -165,9 +393,9 @@ export default function App() {
     error: depositError,
     isFetching: depositLoading,
   } = useQuery({
-    queryKey: ['deposit', latestDepositId],
-    queryFn: () => getDeposit(latestDepositId as string),
-    enabled: Boolean(latestDepositId),
+    queryKey: ['deposit', selectedDepositId, sessionToken],
+    queryFn: () => getDeposit(selectedDepositId as string, sessionToken ?? undefined),
+    enabled: Boolean(selectedDepositId && sessionToken),
     refetchInterval: STATUS_REFRESH_MS,
   })
 
@@ -176,16 +404,25 @@ export default function App() {
     error: withdrawalError,
     isFetching: withdrawalLoading,
   } = useQuery({
-    queryKey: ['withdrawal', latestWithdrawalId],
-    queryFn: () => getWithdrawal(latestWithdrawalId as string),
-    enabled: Boolean(latestWithdrawalId),
+    queryKey: ['withdrawal', selectedWithdrawalId, sessionToken],
+    queryFn: () => getWithdrawal(selectedWithdrawalId as string, sessionToken ?? undefined),
+    enabled: Boolean(selectedWithdrawalId && sessionToken),
     refetchInterval: STATUS_REFRESH_MS,
   })
 
+  useEffect(() => {
+    if (depositError) {
+      maybeHandleSessionAuthError(depositError)
+    }
+    if (withdrawalError) {
+      maybeHandleSessionAuthError(withdrawalError)
+    }
+  }, [depositError, withdrawalError])
+
   const pickupMutation = useMutation({
     mutationFn: ({ id, pickupToken }: { id: string; pickupToken: string }) =>
-      pickupDeposit(id, pickupToken),
-    onSuccess: async (resp) => {
+      pickupDeposit(id, pickupToken, sessionToken ?? undefined),
+    onSuccess: async (resp, variables) => {
       if (resp?.token) {
         const copied = await copyTextWithFallback(resp.token)
         if (copied) {
@@ -196,17 +433,89 @@ export default function App() {
       } else {
         setMessage('Token revealed')
       }
-      if (latestDepositId) {
-        queryClient.invalidateQueries({ queryKey: ['deposit', latestDepositId] })
+      if (variables?.id) {
+        queryClient.invalidateQueries({ queryKey: ['deposit', variables.id] })
+        setDeposits((current) => {
+          const updated = current.map((entry) =>
+            entry.id === variables.id ? { ...entry, pickupToken: null } : entry
+          )
+          persistDeposits(updated, session?.id)
+          return updated
+        })
       }
     },
     onError: (err: unknown) => {
+      if (maybeHandleSessionAuthError(err)) {
+        return
+      }
       const normalized = normalizeError(err)
       if (normalized) {
         setMessage(normalized.message)
       }
     },
   })
+
+  const handleStartSession = async () => {
+    setSessionBusy(true)
+    setMessage(null)
+    try {
+      const response = await startSession()
+      applySessionPayload(response)
+      setResumeCode('')
+      setMessage('New work session started. Write down your claim code to resume later.')
+    } catch (err) {
+      if (err instanceof ApiClientError) {
+        setMessage(`API error (${err.status}): ${err.message}`)
+      } else {
+        setMessage(`Session error: ${(err as Error).message}`)
+      }
+    } finally {
+      setSessionBusy(false)
+    }
+  }
+
+  const handleResumeSession = async (evt: FormEvent<HTMLFormElement>) => {
+    evt.preventDefault()
+    const trimmed = resumeCode.trim()
+    if (!trimmed) {
+      setMessage('Enter your claim code to resume a session.')
+      return
+    }
+    setSessionBusy(true)
+    setMessage(null)
+    try {
+      const response = await resumeSession(trimmed)
+      applySessionPayload(response)
+      setResumeCode('')
+      setMessage('Session resumed. Header will refresh automatically.')
+    } catch (err) {
+      if (!maybeHandleSessionAuthError(err)) {
+        if (err instanceof ApiClientError) {
+          setMessage(`API error (${err.status}): ${err.message}`)
+        } else {
+          setMessage(`Session error: ${(err as Error).message}`)
+        }
+      }
+    } finally {
+      setSessionBusy(false)
+    }
+  }
+
+  const handleEndSession = () => {
+    dropSession('Session cleared. Start a new one when you’re ready.')
+  }
+
+  const handleCopyClaimCode = async () => {
+    if (!session?.claimCode) {
+      return
+    }
+    const copied = await copyTextWithFallback(session.claimCode)
+    if (copied) {
+      setMessage('Claim code copied to clipboard')
+    } else {
+      setMessage('Unable to copy automatically; please copy the claim code manually.')
+    }
+  }
 
   const handleTokenChange = (value: string) => {
     setToken(value)
@@ -230,6 +539,9 @@ export default function App() {
     setMessage(null)
 
     try {
+      if (!sessionToken) {
+        throw new Error('Start or resume a session before submitting a request.')
+      }
       if (flow === 'deposit') {
         const requestedAmount = Number(depositAmount)
         if (!Number.isFinite(requestedAmount) || requestedAmount < config.depositMinSats) {
@@ -247,36 +559,14 @@ export default function App() {
           metadata: { source: 'ui-proto' },
           delivery_hint: resolvedHint || undefined,
         }
-        const creation = await createDeposit(payload)
+        const creation = await createDeposit(payload, sessionToken)
         rememberDeposit(creation.deposit.id, creation.pickup_token)
         setMessage(
           `Deposit ${creation.deposit.id} → ${creation.deposit.address} (${creation.deposit.state})`
         )
       } else {
         let resolvedAmount = Number(withdrawalAmount)
-
-        if (withdrawalMethod === 'token') {
-          if (!tokenMintInfo || 'error' in tokenMintInfo) {
-            throw new Error('Paste a valid Cashu token before submitting')
-          }
-          resolvedAmount = tokenMintInfo.amount
-          if (resolvedAmount < config.withdrawalMinSats) {
-            throw new Error(
-              `Token value must be at least ${config.withdrawalMinSats.toLocaleString()} sats`
-            )
-          }
-        } else {
-          if (resolvedAmount <= 0 || Number.isNaN(resolvedAmount)) {
-            throw new Error('Withdrawal amount must be greater than zero')
-          }
-          if (resolvedAmount < config.withdrawalMinSats) {
-            throw new Error(
-              `Withdrawal amount must be at least ${config.withdrawalMinSats.toLocaleString()} sats`
-            )
-          }
-        }
-
-        const payload: CreateWithdrawalRequest = {
+        let payload: CreateWithdrawalRequest = {
           amount_sats: resolvedAmount,
           delivery_address: deliveryAddress.trim(),
         }
@@ -286,18 +576,44 @@ export default function App() {
           if (!trimmed) {
             throw new Error('Provide a Cashu token or switch to payment requests')
           }
+
+          const decodedAmount = tokenMintInfo && !('error' in tokenMintInfo) ? tokenMintInfo.amount : null
+          if (decodedAmount !== null) {
+            resolvedAmount = decodedAmount
+            if (resolvedAmount < config.withdrawalMinSats) {
+              throw new Error(
+                `Token value must be at least ${config.withdrawalMinSats.toLocaleString()} sats`
+              )
+            }
+          } else {
+            resolvedAmount = config.withdrawalMinSats
+          }
+
+          payload.amount_sats = resolvedAmount
           payload.token = trimmed
         } else {
+          if (resolvedAmount <= 0 || Number.isNaN(resolvedAmount)) {
+            throw new Error('Withdrawal amount must be greater than zero')
+          }
+          if (resolvedAmount < config.withdrawalMinSats) {
+            throw new Error(
+              `Withdrawal amount must be at least ${config.withdrawalMinSats.toLocaleString()} sats`
+            )
+          }
+          payload.amount_sats = resolvedAmount
           payload.create_payment_request = true
         }
 
-        const withdrawal = await createWithdrawal(payload)
+        const withdrawal = await createWithdrawal(payload, sessionToken)
         rememberWithdrawalId(withdrawal.id)
         setMessage(
           `Withdrawal ${withdrawal.id} → ${withdrawal.delivery_address} (${withdrawal.state})`
         )
       }
     } catch (err) {
+      if (maybeHandleSessionAuthError(err)) {
+        return
+      }
       if (err instanceof ApiClientError) {
         setMessage(`API error (${err.status}): ${err.message}`)
       } else {
@@ -309,14 +625,19 @@ export default function App() {
   }
 
   const withdrawalMinimum = config.withdrawalMinSats
+  const decodedTokenAmount =
+    tokenMintInfo && !('error' in tokenMintInfo) ? tokenMintInfo.amount : null
   const tokenBelowMinimum = Boolean(
-    tokenMintInfo &&
-      !('error' in tokenMintInfo) &&
-      tokenMintInfo.amount < withdrawalMinimum
+    decodedTokenAmount !== null && decodedTokenAmount < withdrawalMinimum
   )
+  const hasTokenDetectionError = Boolean(tokenMintInfo && 'error' in tokenMintInfo)
 
   const pickupError = pickupMutation.isError
     ? normalizeError(pickupMutation.error)
+    : null
+
+  const selectedDeposit = selectedDepositId
+    ? deposits.find((entry) => entry.id === selectedDepositId) ?? null
     : null
 
   return (
@@ -372,6 +693,54 @@ export default function App() {
       <section className={`panel ${view === 'operator' ? 'operator-mode' : ''}`}>
         {view === 'kiosk' ? (
           <>
+            <section className="session-panel">
+              {session ? (
+                <div className="session-active">
+                  <p className="eyebrow">Work session</p>
+                  <p className="claim-code">Claim code: <code>{session.claimCode}</code></p>
+                  <p className="helper">Expires {session.expiresAt ? new Date(session.expiresAt).toLocaleString() : 'soon'}</p>
+                  <div className="session-actions">
+                    <button
+                      type="button"
+                      onClick={handleCopyClaimCode}
+                    >
+                      Copy code
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleEndSession}
+                      disabled={sessionBusy}
+                    >
+                      End session
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="session-actions">
+                  <button
+                    type="button"
+                    onClick={handleStartSession}
+                    disabled={sessionBusy}
+                  >
+                    {sessionBusy ? 'Starting…' : 'Start session'}
+                  </button>
+                  <form className="resume-form" onSubmit={handleResumeSession}>
+                    <input
+                      type="text"
+                      value={resumeCode}
+                      onChange={(e) => setResumeCode(e.target.value)}
+                      placeholder="ABCD-EFGH-IJKL-MNOP"
+                    />
+                    <button
+                      type="submit"
+                      disabled={sessionBusy || !resumeCode.trim()}
+                    >
+                      Resume session
+                    </button>
+                  </form>
+                </div>
+              )}
+            </section>
             <form onSubmit={handleSubmit}>
               {flow === 'deposit' ? (
                 <>
@@ -469,22 +838,22 @@ export default function App() {
                         placeholder="Paste ecash token here"
                         required={withdrawalMethod === 'token'}
                       />
-                      {tokenMintInfo &&
-                        ('error' in tokenMintInfo ? (
-                          <span className="helper warning">{tokenMintInfo.error}</span>
-                        ) : (
-                          <span
-                            className={`helper ${
-                              tokenMintInfo.isForeign || tokenBelowMinimum ? 'warning' : 'success'
-                            }`}
-                          >
-                            {tokenBelowMinimum
-                              ? `Token value is ${tokenMintInfo.amount.toLocaleString()} sats, but withdrawals require at least ${withdrawalMinimum.toLocaleString()} sats.`
-                              : tokenMintInfo.isForeign
-                                ? `Foreign token detected (${tokenMintInfo.mintUrl}); will be swapped to the Shuestand mint first. Value: ${tokenMintInfo.amount.toLocaleString()} sats.`
-                                : `Mint detected: ${tokenMintInfo.mintUrl}. Value: ${tokenMintInfo.amount.toLocaleString()} sats.`}
-                          </span>
-                        ))}
+                      {hasTokenDetectionError && tokenMintInfo && 'error' in tokenMintInfo && (
+                        <span className="helper warning">{tokenMintInfo.error}</span>
+                      )}
+                      {decodedTokenAmount !== null && tokenMintInfo && !('error' in tokenMintInfo) && (
+                        <span
+                          className={`helper ${
+                            tokenMintInfo.isForeign || tokenBelowMinimum ? 'warning' : 'success'
+                          }`}
+                        >
+                          {tokenBelowMinimum
+                            ? `Token value is ${decodedTokenAmount.toLocaleString()} sats, but withdrawals require at least ${withdrawalMinimum.toLocaleString()} sats.`
+                            : tokenMintInfo.isForeign
+                              ? `Foreign token detected (${tokenMintInfo.mintUrl}); will be swapped to the Shuestand mint first. Value: ${decodedTokenAmount.toLocaleString()} sats.`
+                              : `Mint detected: ${tokenMintInfo.mintUrl}. Value: ${decodedTokenAmount.toLocaleString()} sats.`}
+                        </span>
+                      )}
                     </label>
                   ) : (
                     <div className="helper">
@@ -521,27 +890,57 @@ export default function App() {
 
               {flow === 'deposit' ? (
                 <>
+                  {deposits.length > 0 && (
+                    <label className="status-select">
+                      Tracked deposits
+                      <select
+                        value={selectedDepositId ?? ''}
+                        onChange={(e) => setSelectedDepositId(e.target.value || null)}
+                      >
+                        {deposits.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.id}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                   <DepositStatusCard
                     deposit={latestDeposit}
                     error={normalizeError(depositError)}
                     isLoading={depositLoading}
-                    hasSubmission={Boolean(latestDepositId)}
-                    pickupToken={latestDepositPickupToken}
+                    hasSubmission={Boolean(selectedDepositId)}
+                    pickupToken={selectedDeposit?.pickupToken ?? null}
                     onPickup={handleDepositPickup}
                     pickupPending={pickupMutation.isPending}
                     pickupError={pickupError}
-                    onClear={clearDepositId}
+                    onClear={deposits.length ? clearDepositId : undefined}
                   />
                 </>
               ) : (
                 <>
+                  {withdrawals.length > 0 && (
+                    <label className="status-select">
+                      Tracked withdrawals
+                      <select
+                        value={selectedWithdrawalId ?? ''}
+                        onChange={(e) => setSelectedWithdrawalId(e.target.value || null)}
+                      >
+                        {withdrawals.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.id}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                   <WithdrawalStatusCard
                     withdrawal={latestWithdrawal}
                     error={normalizeError(withdrawalError)}
                     isLoading={withdrawalLoading}
-                    hasSubmission={Boolean(latestWithdrawalId)}
+                    hasSubmission={Boolean(selectedWithdrawalId)}
                   />
-                  {latestWithdrawalId && (
+                  {selectedWithdrawalId && (
                     <button
                       type="button"
                       className="link-button"

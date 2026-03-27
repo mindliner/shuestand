@@ -47,6 +47,7 @@ const ADDRESS_POOL_REFILL_INTERVAL_SECS: u64 = 60;
 const ELECTRUM_RETRY: u8 = 5;
 const ELECTRUM_TIMEOUT_SECS: u8 = 30;
 const PREDEPOSIT_TX_TOLERANCE_SECS: i64 = 600; // 10 minutes
+const DEFAULT_SESSION_TTL_HOURS: i64 = 8;
 
 #[derive(Clone, Copy, PartialEq)]
 enum FloatBand {
@@ -123,6 +124,7 @@ struct AppState {
     float_max_ratio: f32,
     withdrawal_min_sats: u64,
     single_request_cap_ratio: f64,
+    session_ttl: ChronoDuration,
 }
 
 #[tokio::main]
@@ -477,6 +479,7 @@ async fn main() -> Result<(), anyhow::Error> {
         float_max_ratio: config.float_max_ratio,
         withdrawal_min_sats: config.withdrawal_min_sats,
         single_request_cap_ratio: config.single_request_cap_ratio,
+        session_ttl: ChronoDuration::hours(DEFAULT_SESSION_TTL_HOURS),
     };
 
     let app = http::router(state).layer(cors);
