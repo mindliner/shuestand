@@ -129,6 +129,48 @@ shuestand/
 
 Once running, update `infra/docker/backend.env` whenever you rotate keys/policies and restart the backend service (`docker compose restart backend`).
 
+## Publishing behind a reverse proxy
+When the Docker stack lives on an internal host (e.g., `vm-docker:8872`), expose it through a public reverse proxy so visitors reach it via HTTPS without touching the internal network.
+
+1. **Pick the public domain + certificate.** Request a Let’s Encrypt cert (webroot or DNS) for the hostname you plan to expose (e.g., `shuestand.mountainlake.io`).
+2. **Create an upstream + redirect block.** On the proxy host (nginx example), add a server that forwards both the kiosk assets and `/api` calls to the compose frontend listener:
+
+   ```nginx
+   upstream shuestand_frontend {
+       server vm-docker:8872;
+   }
+
+   server {
+       listen 80;
+       listen [::]:80;
+       server_name shuestand.mountainlake.io;
+
+       location /.well-known/acme-challenge/ {
+           root /var/www/certbot;
+       }
+
+       return 301 https://$host$request_uri;
+   }
+
+   server {
+       listen 443 ssl;
+       listen [::]:443 ssl;
+       server_name shuestand.mountainlake.io;
+
+       ssl_certificate     /etc/letsencrypt/live/shuestand.mountainlake.io/fullchain.pem;
+       ssl_certificate_key /etc/letsencrypt/live/shuestand.mountainlake.io/privkey.pem;
+       include /etc/letsencrypt/options-ssl-nginx.conf;
+       ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+       location / {
+           proxy_pass http://shuestand_frontend;
+           include /etc/nginx/snippets/ssl-proxy-params.conf; # sets Host/X-Forwarded-* headers
+       }
+   }
+   ```
+
+3. **Reload nginx and verify HTTPS.** Visit `https://<domain>` and confirm that the kiosk loads and that the Nut18 QR transports point to the HTTPS host (the backend derives the callback URL from `Host` + `X-Forwarded-Proto`). Avoid double-proxy stacks that overwrite `X-Forwarded-Proto` with `http`, otherwise Cashu wallets will refuse to POST back to the funding endpoint.
+
 ## Development Notes
 - Rust nightly not required; stick to stable + Clippy + fmt in CI.
 - Frontend uses pnpm + TypeScript strict mode.

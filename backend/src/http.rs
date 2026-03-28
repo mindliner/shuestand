@@ -1,5 +1,6 @@
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Path, Query, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
@@ -941,8 +942,10 @@ async fn get_withdrawal(
 async fn submit_payment_request(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(payload): Json<Nut18PaymentPayload>,
+    body: Bytes,
 ) -> ApiResult<PaymentAcceptResponse> {
+    let payload: Nut18PaymentPayload = serde_json::from_slice(&body)
+        .map_err(|err| invalid_request(format!("invalid payment payload JSON: {err}")))?;
     let withdrawal = match state.db.fetch_withdrawal(&id).await {
         Ok(wd) => wd,
         Err(sqlx::Error::RowNotFound) => return Err(not_found("withdrawal_not_found")),
