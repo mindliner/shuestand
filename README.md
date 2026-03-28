@@ -3,7 +3,7 @@
 > Bidirectional Bitcoin ⇄ Cashu bridge desk for events, kiosks, and pop-up sats stands.
 
 ## TL;DR
-Shuestand lets users fund a Cashu wallet from on-chain Bitcoin or withdraw sats back out, all through a single, kiosk-friendly interface. The frontend borrows the polished flow we developed for Catofa, while the backend reuses Lakeside7s Cashu plumbing, adds on-chain watchers, and sits on top of our trusted infrastructure stack:
+Shuestand lets users fund a Cashu wallet from on-chain Bitcoin or withdraw sats back out, all through a single, kiosk-friendly interface. The frontend borrows the polished flow we developed for Catofa, while the backend reuses Lakeside's Cashu plumbing, adds on-chain watchers, and sits on top of our trusted infrastructure stack:
 
 |      Layer      |                        Default choice                       |
 |-----------------|-------------------------------------------------------------|

@@ -8,6 +8,8 @@ const STORAGE_KEYS = {
   legacyDeposit: 'shuestand.latestDepositId',
   legacyWithdrawal: 'shuestand.latestWithdrawalId',
   deliveryAddress: 'shuestand.latestDeliveryAddress',
+  theme: 'shuestand.theme',
+  view: 'shuestand.view',
 }
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import './App.css'
@@ -15,6 +17,7 @@ import { config } from './config'
 import { copyTextWithFallback } from './lib/clipboard'
 import { DELIVERY_TARGETS } from './config/deliveryTargets'
 import { detectTokenMint } from './lib/cashu'
+import { isValidBitcoinAddress } from './lib/bitcoin'
 import type { CreateWithdrawalRequest, SessionStartResponse } from './types/api'
 import {
   ApiClientError,
@@ -34,6 +37,7 @@ import { OperatorPanel } from './components/OperatorPanel'
 
 type Flow = 'deposit' | 'withdrawal'
 type ViewMode = 'kiosk' | 'operator'
+type Theme = 'light' | 'dark'
 type TokenMintInfo =
   | { mintUrl: string; isForeign: boolean; amount: number }
   | { error: string }
@@ -50,13 +54,28 @@ const DEFAULT_DEPOSIT_AMOUNT = config.depositMinSats.toString()
 const DEFAULT_WITHDRAWAL_AMOUNT = config.withdrawalMinSats.toString()
 const STATUS_REFRESH_MS = 5000
 
+const detectPreferredTheme = (): Theme => {
+  if (typeof window === 'undefined') {
+    return 'dark'
+  }
+  const stored = window.localStorage.getItem(STORAGE_KEYS.theme)
+  if (stored === 'light' || stored === 'dark') {
+    return stored
+  }
+  if (window.matchMedia) {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  }
+  return 'dark'
+}
+
 const normalizeError = (err: unknown): Error | null => {
   if (!err) return null
   return err instanceof Error ? err : new Error(String(err))
 }
 
 export default function App() {
-  const [view, setView] = useState<ViewMode>('kiosk')
+  const [theme, setTheme] = useState<Theme>(() => detectPreferredTheme())
+  const [view, setView] = useState<ViewMode | null>(null)
   const [flow, setFlow] = useState<Flow>('deposit')
   const [depositAmount, setDepositAmount] = useState(DEFAULT_DEPOSIT_AMOUNT)
   const [withdrawalAmount, setWithdrawalAmount] = useState(DEFAULT_WITHDRAWAL_AMOUNT)
@@ -77,8 +96,32 @@ export default function App() {
   const [session, setSession] = useState<SessionInfo | null>(null)
   const [sessionBusy, setSessionBusy] = useState(false)
   const [resumeCode, setResumeCode] = useState('')
+  const [resumeFlowHint, setResumeFlowHint] = useState(false)
+  const [sessionHydrationTick, setSessionHydrationTick] = useState(0)
+
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return
+    }
+    document.documentElement.setAttribute('data-theme', theme)
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(STORAGE_KEYS.theme, theme)
+    }
+  }, [theme])
 
   const scopedKey = (base: string, sessionId: string) => `${base}.${sessionId}`
+
+  const persistViewSelection = (mode: ViewMode | null, sessionId?: string) => {
+    if (typeof window === 'undefined' || !sessionId) {
+      return
+    }
+    const key = scopedKey(STORAGE_KEYS.view, sessionId)
+    if (mode) {
+      window.sessionStorage.setItem(key, mode)
+    } else {
+      window.sessionStorage.removeItem(key)
+    }
+  }
 
   const persistDeposits = (entries: StoredDeposit[], sessionId?: string) => {
     if (typeof window === 'undefined' || !sessionId) {
@@ -112,7 +155,7 @@ export default function App() {
     setSelectedWithdrawalId(null)
   }
 
-  const applySessionPayload = (payload: SessionStartResponse) => {
+  const applySessionPayload = (payload: SessionStartResponse, opts?: { resumed?: boolean }) => {
     const info: SessionInfo = {
       id: payload.session_id,
       token: payload.token,
@@ -120,13 +163,22 @@ export default function App() {
       expiresAt: payload.expires_at,
     }
     resetTrackingState()
+    persistViewSelection(null, info.id)
+    setView(null)
     setSession(info)
     storeSessionInfo(info)
+    setResumeFlowHint(Boolean(opts?.resumed))
   }
 
   const dropSession = (notice?: string) => {
+    if (session?.id) {
+      persistViewSelection(null, session.id)
+    }
     storeSessionInfo(null)
     setSession(null)
+    setView(null)
+    setResumeFlowHint(false)
+    setSessionHydrationTick(0)
     resetTrackingState()
     setResumeCode('')
     if (notice) {
@@ -179,6 +231,7 @@ export default function App() {
     }
     if (!session?.id) {
       resetTrackingState()
+      setSessionHydrationTick(0)
       return
     }
 
@@ -303,14 +356,46 @@ export default function App() {
 
     hydrateDeposits()
     hydrateWithdrawals()
+    setSessionHydrationTick((prev) => prev + 1)
 
   }, [session])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+    if (!session?.id) {
+      setView(null)
+      return
+    }
+    const key = scopedKey(STORAGE_KEYS.view, session.id)
+    const stored = window.sessionStorage.getItem(key)
+    if (stored === 'kiosk' || stored === 'operator') {
+      setView(stored)
+    } else {
+      setView(null)
+    }
+  }, [session?.id])
 
   useEffect(() => {
     if (flow !== 'withdrawal') {
       setTokenMintInfo(null)
     }
   }, [flow])
+
+  useEffect(() => {
+    if (!resumeFlowHint || sessionHydrationTick === 0) {
+      return
+    }
+    if (deposits.length === 0 && withdrawals.length > 0) {
+      setFlow('withdrawal')
+    }
+    setResumeFlowHint(false)
+  }, [resumeFlowHint, sessionHydrationTick, deposits.length, withdrawals.length])
+
+  const handleThemeSelect = (mode: Theme) => {
+    setTheme(mode)
+  }
 
   const rememberDeposit = (id: string, pickupToken: string) => {
     if (!session?.id) {
@@ -334,6 +419,14 @@ export default function App() {
       return next
     })
     setSelectedWithdrawalId(id)
+  }
+
+  const handleSelectView = (mode: ViewMode) => {
+    if (!session?.id) {
+      return
+    }
+    setView(mode)
+    persistViewSelection(mode, session.id)
   }
 
   const clearDepositId = () => {
@@ -485,7 +578,7 @@ export default function App() {
     setMessage(null)
     try {
       const response = await resumeSession(trimmed)
-      applySessionPayload(response)
+      applySessionPayload(response, { resumed: true })
       setResumeCode('')
       setMessage('Session resumed. Header will refresh automatically.')
     } catch (err) {
@@ -566,9 +659,16 @@ export default function App() {
         )
       } else {
         let resolvedAmount = Number(withdrawalAmount)
+        const normalizedAddress = deliveryAddress.trim()
+        if (!normalizedAddress) {
+          throw new Error('Enter a Bitcoin address before submitting the withdrawal.')
+        }
+        if (!isValidBitcoinAddress(normalizedAddress)) {
+          throw new Error('Enter a valid Bitcoin address (bc1…, 1…, or 3…).')
+        }
         let payload: CreateWithdrawalRequest = {
           amount_sats: resolvedAmount,
-          delivery_address: deliveryAddress.trim(),
+          delivery_address: normalizedAddress,
         }
 
         if (withdrawalMethod === 'token') {
@@ -640,36 +740,94 @@ export default function App() {
     ? deposits.find((entry) => entry.id === selectedDepositId) ?? null
     : null
 
+  const hasSession = Boolean(session)
+  const viewSelected = Boolean(view)
+  const headerTitle = !hasSession
+    ? 'Start a work session'
+    : !viewSelected
+      ? 'Pick your workspace'
+      : view === 'operator'
+        ? 'Operator console'
+        : 'Manage your sats float'
+  const headerDescription = !hasSession
+    ? 'Sessions keep each kiosk run scoped. Start or resume to track deposits, withdrawals, and operator work under one claim code.'
+    : !viewSelected
+      ? 'Choose whether this session runs the kiosk tools or the operator console.'
+      : view === 'operator'
+        ? 'Inspect hot-wallet liquidity, rescan Electrum, and push manual payouts when needed.'
+        : 'Simple kiosk-ready interface for funding Cashu wallets from on-chain bitcoin and redeeming ecash back to addresses.'
+  const showViewToggle = hasSession && viewSelected
+  const showModeToggle = view === 'kiosk'
+  const sessionExpiryText = session?.expiresAt ? new Date(session.expiresAt).toLocaleString() : 'soon'
+  const sessionSummaryCard = session ? (
+    <div className="session-summary-card">
+      <div>
+        <p className="eyebrow">Active session</p>
+        <p className="claim-code">
+          Claim code: <code>{session.claimCode}</code>
+        </p>
+        <p className="helper">Expires {sessionExpiryText}</p>
+      </div>
+      <div className="session-actions">
+        <button type="button" onClick={handleCopyClaimCode}>
+          Copy code
+        </button>
+        <button type="button" onClick={handleEndSession} disabled={sessionBusy}>
+          End session
+        </button>
+      </div>
+    </div>
+  ) : null
+  const panelClassName = !hasSession
+    ? 'panel session-only'
+    : !viewSelected
+      ? 'panel session-gate'
+      : `panel ${view === 'operator' ? 'operator-mode' : ''}`
+
   return (
     <main className="app-shell">
       <header>
         <div>
           <p className="eyebrow">shuestand · cashu ↔ bitcoin</p>
-          <h1>{view === 'kiosk' ? 'Manage your sats float' : 'Operator console'}</h1>
-          <p className="lede">
-            {view === 'kiosk'
-              ? 'Simple kiosk-ready interface for funding Cashu wallets from on-chain bitcoin and redeeming ecash back to addresses.'
-              : 'Inspect hot-wallet liquidity, rescan Electrum, and push manual payouts when needed.'}
-          </p>
+          <h1>{headerTitle}</h1>
+          <p className="lede">{headerDescription}</p>
         </div>
         <div className="header-actions">
-          <div className="view-toggle">
+          <div className="theme-toggle" role="group" aria-label="Color theme">
             <button
-              className={view === 'kiosk' ? 'active' : ''}
               type="button"
-              onClick={() => setView('kiosk')}
+              className={theme === 'light' ? 'active' : ''}
+              onClick={() => handleThemeSelect('light')}
             >
-              Kiosk
+              Day
             </button>
             <button
-              className={view === 'operator' ? 'active' : ''}
               type="button"
-              onClick={() => setView('operator')}
+              className={theme === 'dark' ? 'active' : ''}
+              onClick={() => handleThemeSelect('dark')}
             >
-              Operator
+              Night
             </button>
           </div>
-          {view === 'kiosk' && (
+          {showViewToggle && (
+            <div className="view-toggle">
+              <button
+                className={view === 'kiosk' ? 'active' : ''}
+                type="button"
+                onClick={() => handleSelectView('kiosk')}
+              >
+                Kiosk
+              </button>
+              <button
+                className={view === 'operator' ? 'active' : ''}
+                type="button"
+                onClick={() => handleSelectView('operator')}
+              >
+                Operator
+              </button>
+            </div>
+          )}
+          {showModeToggle && (
             <div className="mode-toggle">
               <button
                 className={flow === 'deposit' ? 'active' : ''}
@@ -690,58 +848,76 @@ export default function App() {
         </div>
       </header>
 
-      <section className={`panel ${view === 'operator' ? 'operator-mode' : ''}`}>
-        {view === 'kiosk' ? (
+      <section className={panelClassName}>
+        {!hasSession ? (
+          <div className="session-card hero">
+            <p className="eyebrow">Work session</p>
+            <h2>Start or resume to continue</h2>
+            <p className="helper lead">
+              Every kiosk or operator action belongs to a work session so you can pause, resume, and audit safely.
+            </p>
+            <div className="session-actions-large">
+              <button
+                type="button"
+                onClick={handleStartSession}
+                disabled={sessionBusy}
+              >
+                {sessionBusy ? 'Starting…' : 'Start new session'}
+              </button>
+              <form className="resume-form" onSubmit={handleResumeSession}>
+                <label>
+                  Claim code
+                  <input
+                    type="text"
+                    value={resumeCode}
+                    onChange={(e) => setResumeCode(e.target.value)}
+                    placeholder="ABCD-EFGH-IJKL-MNOP"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  disabled={sessionBusy || !resumeCode.trim()}
+                >
+                  Resume session
+                </button>
+              </form>
+            </div>
+            <p className="helper subtle">Claim codes expire automatically — copy them somewhere safe.</p>
+            {message && <p className="message">{message}</p>}
+          </div>
+        ) : !viewSelected ? (
           <>
-            <section className="session-panel">
-              {session ? (
-                <div className="session-active">
-                  <p className="eyebrow">Work session</p>
-                  <p className="claim-code">Claim code: <code>{session.claimCode}</code></p>
-                  <p className="helper">Expires {session.expiresAt ? new Date(session.expiresAt).toLocaleString() : 'soon'}</p>
-                  <div className="session-actions">
-                    <button
-                      type="button"
-                      onClick={handleCopyClaimCode}
-                    >
-                      Copy code
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleEndSession}
-                      disabled={sessionBusy}
-                    >
-                      End session
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="session-actions">
-                  <button
-                    type="button"
-                    onClick={handleStartSession}
-                    disabled={sessionBusy}
-                  >
-                    {sessionBusy ? 'Starting…' : 'Start session'}
-                  </button>
-                  <form className="resume-form" onSubmit={handleResumeSession}>
-                    <input
-                      type="text"
-                      value={resumeCode}
-                      onChange={(e) => setResumeCode(e.target.value)}
-                      placeholder="ABCD-EFGH-IJKL-MNOP"
-                    />
-                    <button
-                      type="submit"
-                      disabled={sessionBusy || !resumeCode.trim()}
-                    >
-                      Resume session
-                    </button>
-                  </form>
-                </div>
-              )}
-            </section>
-            <form onSubmit={handleSubmit}>
+            {sessionSummaryCard}
+            <div className="mode-primer">
+              <p className="eyebrow">Choose your workspace</p>
+              <div className="view-cards">
+                <button
+                  type="button"
+                  className="view-card"
+                  onClick={() => handleSelectView('kiosk')}
+                >
+                  <h3>Kiosk mode</h3>
+                  <p>Guide guests through deposits, pickups, and Cashu-to-bitcoin withdrawals.</p>
+                  <span className="cta-label">Enter kiosk</span>
+                </button>
+                <button
+                  type="button"
+                  className="view-card"
+                  onClick={() => handleSelectView('operator')}
+                >
+                  <h3>Operator mode</h3>
+                  <p>Monitor float, rescan wallets, and settle or retry stuck payouts.</p>
+                  <span className="cta-label">Enter operator</span>
+                </button>
+              </div>
+            </div>
+            {message && <p className="message">{message}</p>}
+          </>
+        ) : view === 'kiosk' ? (
+          <>
+            <div className="workspace-column">
+              {sessionSummaryCard}
+              <form onSubmit={handleSubmit}>
               {flow === 'deposit' ? (
                 <>
                   <label>
@@ -878,6 +1054,7 @@ export default function App() {
                 {isSubmitting ? 'Submitting…' : 'Submit request'}
               </button>
             </form>
+            </div>
 
             <aside>
               <h2>Status</h2>
@@ -954,7 +1131,11 @@ export default function App() {
             </aside>
           </>
         ) : (
-          <OperatorPanel />
+          <div className="operator-wrapper">
+            {sessionSummaryCard}
+            {message && <p className="message">{message}</p>}
+            <OperatorPanel />
+          </div>
         )}
       </section>
     </main>
