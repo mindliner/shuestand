@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use axum::http::Method;
 use backend::address::{AddressFactory, AddressPool};
 use backend::config::AppConfig;
-use backend::db::{Database, DepositState};
-use backend::onchain::{BlockchainClient, OnchainWallet};
+use backend::db::{Database, DepositState, WithdrawalState};
+use backend::onchain::{BlockchainClient, OnchainWallet, TxStatus};
 use backend::telemetry::AppMetrics;
 use backend::wallet::{
     MintSwapService, MultiMintWalletManager, WalletConfig, WalletHandle, open_wallet,
@@ -459,6 +459,22 @@ async fn main() -> Result<(), anyhow::Error> {
         tracing::info!(target: "backend", "deposit worker disabled via config");
     }
 
+    if let Some(wallet) = onchain_wallet.clone() {
+        let watcher_db = db.clone();
+        let poll_every = config.confirmation_poll_interval;
+        let target_conf = config.withdrawal_target_confirmations;
+        tokio::spawn(async move {
+            loop {
+                if let Err(err) =
+                    process_withdrawal_settlements(&watcher_db, wallet.clone(), target_conf).await
+                {
+                    tracing::error!(target: "backend", error = %err, "withdrawal confirmation pass failed");
+                }
+                sleep(poll_every).await;
+            }
+        });
+    }
+
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST])
         .allow_headers(Any)
@@ -749,6 +765,52 @@ async fn process_confirmations(db: &Database, chain: &dyn ChainSource) -> Result
                 .await?;
             db.update_address_observation(&deposit.id, &observation.txid, confirmations)
                 .await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn process_withdrawal_settlements(
+    db: &Database,
+    wallet: Arc<OnchainWallet>,
+    target_confirmations: u8,
+) -> Result<(), anyhow::Error> {
+    let tracked = db
+        .list_withdrawals_by_state(&[WithdrawalState::Broadcasting, WithdrawalState::Confirming])
+        .await?;
+    if tracked.is_empty() {
+        return Ok(());
+    }
+
+    if let Err(err) = wallet.sync().await {
+        tracing::warn!(target: "backend", error = %err, "on-chain wallet sync failed during withdrawal watcher");
+    }
+
+    for withdrawal in tracked {
+        let txid = match withdrawal.txid.as_deref() {
+            Some(value) => value,
+            None => continue,
+        };
+
+        match wallet.tx_status(txid).await? {
+            None => {
+                tracing::debug!(target: "backend", withdrawal_id = %withdrawal.id, "withdrawal txid not yet visible in wallet");
+            }
+            Some(TxStatus::Pending) => {
+                if withdrawal.state == WithdrawalState::Broadcasting {
+                    db.update_withdrawal_chain_state(&withdrawal.id, WithdrawalState::Confirming)
+                        .await?;
+                    tracing::info!(target: "backend", withdrawal_id = %withdrawal.id, txid = txid, "withdrawal broadcast observed in mempool");
+                }
+            }
+            Some(TxStatus::Confirmed) => {
+                if withdrawal.state != WithdrawalState::Settled {
+                    db.update_withdrawal_chain_state(&withdrawal.id, WithdrawalState::Settled)
+                        .await?;
+                    tracing::info!(target: "backend", withdrawal_id = %withdrawal.id, txid = txid, target_confirmations = target_confirmations, "withdrawal reached confirmation target");
+                }
+            }
         }
     }
 

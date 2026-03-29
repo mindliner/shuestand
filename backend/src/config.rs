@@ -10,6 +10,7 @@ use bdk::keys::bip39::{Language, Mnemonic};
 
 const DEFAULT_ADDRESS_POOL_TARGET: u32 = 20;
 const DEFAULT_DEPOSIT_TARGET_CONFIRMATIONS: u8 = 3;
+const DEFAULT_WITHDRAWAL_TARGET_CONFIRMATIONS: u8 = 1;
 const CONFIRMATION_POLL_INTERVAL_SECS: u64 = 30;
 const DEFAULT_WITHDRAWAL_WORKER_INTERVAL_SECS: u64 = 15;
 const DEFAULT_WITHDRAWAL_MAX_ATTEMPTS: u32 = 5;
@@ -37,6 +38,7 @@ pub struct AppConfig {
     pub bitcoin_electrum_validate_domain: bool,
     pub address_pool_target: u32,
     pub deposit_target_confirmations: u8,
+    pub withdrawal_target_confirmations: u8,
     pub confirmation_poll_interval: Duration,
     pub withdrawal_worker_interval: Duration,
     pub withdrawal_worker_enabled: bool,
@@ -95,6 +97,11 @@ impl AppConfig {
             .and_then(|v| v.parse::<u8>().ok())
             .filter(|v| *v > 0)
             .unwrap_or(DEFAULT_DEPOSIT_TARGET_CONFIRMATIONS);
+        let withdrawal_target_confirmations = std::env::var("WITHDRAWAL_TARGET_CONFIRMATIONS")
+            .ok()
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_WITHDRAWAL_TARGET_CONFIRMATIONS);
         let confirmation_poll_interval = Duration::from_secs(
             std::env::var("CONFIRMATION_POLL_INTERVAL_SECS")
                 .ok()
@@ -226,6 +233,7 @@ impl AppConfig {
             bitcoin_electrum_validate_domain,
             address_pool_target,
             deposit_target_confirmations,
+            withdrawal_target_confirmations,
             confirmation_poll_interval,
             withdrawal_worker_interval,
             withdrawal_worker_enabled,

@@ -233,7 +233,14 @@ export function WithdrawalStatusCard({
         </p>
       )}
 
-      <StatusTimeline stages={WITHDRAWAL_STAGES} current={withdrawal.state} />
+      <StatusTimeline
+        stages={
+          withdrawal.state === 'failed'
+            ? WITHDRAWAL_STAGES
+            : WITHDRAWAL_STAGES.filter((stage) => stage.key !== 'failed')
+        }
+        current={withdrawal.state}
+      />
     </div>
   )
 }
@@ -309,12 +316,13 @@ interface StatusTimelineProps<T extends string> {
 function StatusTimeline<T extends string>({ stages, current }: StatusTimelineProps<T>) {
   const currentIndex = stages.findIndex((stage) => stage.key === current)
   const activeIndex = currentIndex === -1 ? 0 : currentIndex
+  const isFinalStage = currentIndex !== -1 && activeIndex === stages.length - 1
 
   return (
     <ol className="status-timeline">
       {stages.map((stage, idx) => {
         const stateClass =
-          idx < activeIndex
+          idx < activeIndex || (isFinalStage && idx === activeIndex)
             ? 'complete'
             : idx === activeIndex
               ? 'active'

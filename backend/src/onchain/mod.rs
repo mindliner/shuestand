@@ -4,7 +4,7 @@ use self::postgres_db::PgWalletDatabase;
 use crate::db::Database;
 use anyhow::{Context, Result};
 use bdk::Error as BdkError;
-use bdk::bitcoin::{Address, Network};
+use bdk::bitcoin::{Address, Network, Txid};
 use bdk::blockchain::electrum::{ElectrumBlockchain, ElectrumBlockchainConfig};
 use bdk::blockchain::esplora::{EsploraBlockchain, EsploraError};
 use bdk::blockchain::{Blockchain, ConfigurableBlockchain};
@@ -21,6 +21,12 @@ use uuid::Uuid;
 enum WalletBackend {
     Memory(Wallet<MemoryDatabase>),
     Postgres(Wallet<PgWalletDatabase>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxStatus {
+    Pending,
+    Confirmed,
 }
 
 const CHAIN_STOP_GAP: usize = 10;
@@ -113,6 +119,20 @@ impl WalletBackend {
                 Err(err) => return Err(err),
             }
         }
+    }
+
+    fn get_tx_status(&self, txid: &Txid) -> Result<Option<TxStatus>, BdkError> {
+        let details = match self {
+            WalletBackend::Memory(wallet) => wallet.get_tx(txid, false)?,
+            WalletBackend::Postgres(wallet) => wallet.get_tx(txid, false)?,
+        };
+        Ok(details.map(|info| {
+            if info.confirmation_time.is_some() {
+                TxStatus::Confirmed
+            } else {
+                TxStatus::Pending
+            }
+        }))
     }
 
     fn next_external_address(&mut self) -> Result<String, BdkError> {
@@ -287,6 +307,17 @@ impl OnchainWallet {
         })
         .await??;
         Ok(txid)
+    }
+
+    pub async fn tx_status(&self, txid: &str) -> Result<Option<TxStatus>> {
+        let txid = Txid::from_str(txid).context("parsing txid")?;
+        let wallet = self.wallet.clone();
+        let status = spawn_blocking(move || {
+            let guard = wallet.lock().expect("wallet mutex poisoned");
+            guard.get_tx_status(&txid)
+        })
+        .await??;
+        Ok(status)
     }
 }
 

@@ -1,0 +1,1011 @@
+import type { FormEvent } from 'react'
+import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+
+const STORAGE_KEYS = {
+  session: 'shuestand.session',
+  deposits: 'shuestand.deposits',
+  withdrawals: 'shuestand.withdrawals',
+  legacyDeposit: 'shuestand.latestDepositId',
+  legacyWithdrawal: 'shuestand.latestWithdrawalId',
+  deliveryAddress: 'shuestand.latestDeliveryAddress',
+}
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import './App.css'
+import { config } from './config'
+import { copyTextWithFallback } from './lib/clipboard'
+import { DELIVERY_TARGETS } from './config/deliveryTargets'
+import { detectTokenMint } from './lib/cashu'
+import { isValidBitcoinAddress } from './lib/bitcoin'
+import type { Theme } from './lib/theme'
+import type { CreateWithdrawalRequest, SessionStartResponse } from './types/api'
+import {
+  ApiClientError,
+  createDeposit,
+  createWithdrawal,
+  getDeposit,
+  getWithdrawal,
+  pickupDeposit,
+  startSession,
+  resumeSession,
+} from './lib/api'
+import {
+  DepositStatusCard,
+  WithdrawalStatusCard,
+} from './components/KioskStatusCards'
+
+type Flow = 'deposit' | 'withdrawal'
+type KioskAppProps = {
+  theme: Theme
+  onThemeSelect: (mode: Theme) => void
+}
+type TokenMintInfo =
+  | { mintUrl: string; isForeign: boolean; amount: number }
+  | { error: string }
+type StoredDeposit = { id: string; pickupToken?: string | null }
+type StoredWithdrawal = { id: string }
+type SessionInfo = {
+  id: string
+  token: string
+  claimCode: string
+  expiresAt: string
+}
+
+const DEFAULT_DEPOSIT_AMOUNT = config.depositMinSats.toString()
+const DEFAULT_WITHDRAWAL_AMOUNT = config.withdrawalMinSats.toString()
+const STATUS_REFRESH_MS = 5000
+
+const normalizeError = (err: unknown): Error | null => {
+  if (!err) return null
+  return err instanceof Error ? err : new Error(String(err))
+}
+
+export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
+  const [flow, setFlow] = useState<Flow>('deposit')
+  const [depositAmount, setDepositAmount] = useState(DEFAULT_DEPOSIT_AMOUNT)
+  const [withdrawalAmount, setWithdrawalAmount] = useState(DEFAULT_WITHDRAWAL_AMOUNT)
+  const [withdrawalMethod, setWithdrawalMethod] = useState<'token' | 'payment_request'>(
+    'token'
+  )
+  const [deliveryTarget, setDeliveryTarget] = useState('manual')
+  const [customDeliveryHint, setCustomDeliveryHint] = useState('')
+  const [token, setToken] = useState('')
+  const [tokenMintInfo, setTokenMintInfo] = useState<TokenMintInfo | null>(null)
+  const [deliveryAddress, setDeliveryAddress] = useState('')
+  const [isSubmitting, setSubmitting] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+  const [deposits, setDeposits] = useState<StoredDeposit[]>([])
+  const [selectedDepositId, setSelectedDepositId] = useState<string | null>(null)
+  const [withdrawals, setWithdrawals] = useState<StoredWithdrawal[]>([])
+  const [selectedWithdrawalId, setSelectedWithdrawalId] = useState<string | null>(null)
+  const [session, setSession] = useState<SessionInfo | null>(null)
+  const [sessionBusy, setSessionBusy] = useState(false)
+  const [resumeCode, setResumeCode] = useState('')
+  const [resumeFlowHint, setResumeFlowHint] = useState(false)
+  const [sessionHydrationTick, setSessionHydrationTick] = useState(0)
+  const navigate = useNavigate()
+
+  const scopedKey = (base: string, sessionId: string) => `${base}.${sessionId}`
+
+  const persistDeposits = (entries: StoredDeposit[], sessionId?: string) => {
+    if (typeof window === 'undefined' || !sessionId) {
+      return
+    }
+    window.localStorage.setItem(scopedKey(STORAGE_KEYS.deposits, sessionId), JSON.stringify(entries))
+  }
+
+  const persistWithdrawals = (entries: StoredWithdrawal[], sessionId?: string) => {
+    if (typeof window === 'undefined' || !sessionId) {
+      return
+    }
+    window.localStorage.setItem(scopedKey(STORAGE_KEYS.withdrawals, sessionId), JSON.stringify(entries))
+  }
+
+  const storeSessionInfo = (info: SessionInfo | null) => {
+    if (typeof window === 'undefined') {
+      return
+    }
+    if (info) {
+      window.sessionStorage.setItem(STORAGE_KEYS.session, JSON.stringify(info))
+    } else {
+      window.sessionStorage.removeItem(STORAGE_KEYS.session)
+    }
+  }
+
+  const resetTrackingState = () => {
+    setDeposits([])
+    setSelectedDepositId(null)
+    setWithdrawals([])
+    setSelectedWithdrawalId(null)
+  }
+
+  const applySessionPayload = (payload: SessionStartResponse, opts?: { resumed?: boolean }) => {
+    const info: SessionInfo = {
+      id: payload.session_id,
+      token: payload.token,
+      claimCode: payload.claim_code,
+      expiresAt: payload.expires_at,
+    }
+    resetTrackingState()
+    setSession(info)
+    storeSessionInfo(info)
+    setResumeFlowHint(Boolean(opts?.resumed))
+  }
+
+  const dropSession = (notice?: string) => {
+    storeSessionInfo(null)
+    setSession(null)
+    setResumeFlowHint(false)
+    setSessionHydrationTick(0)
+    resetTrackingState()
+    setResumeCode('')
+    if (notice) {
+      setMessage(notice)
+    }
+  }
+
+  const SESSION_ERROR_CODES = new Set(['session_invalid', 'session_expired', 'session_required'])
+
+  const maybeHandleSessionAuthError = (err: unknown) => {
+    if (err instanceof ApiClientError && err.code && SESSION_ERROR_CODES.has(err.code)) {
+      dropSession('Session expired or invalid. Start a new one to keep working.')
+      return true
+    }
+    return false
+  }
+
+  const queryClient = useQueryClient()
+  const sessionToken = session?.token ?? null
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+    const rawSession = window.sessionStorage.getItem(STORAGE_KEYS.session)
+    if (rawSession) {
+      try {
+        const parsed = JSON.parse(rawSession)
+        if (parsed && typeof parsed === 'object' && typeof parsed.id === 'string' && typeof parsed.token === 'string') {
+          setSession({
+            id: parsed.id,
+            token: parsed.token,
+            claimCode: parsed.claimCode ?? parsed.claim_code ?? '',
+            expiresAt: parsed.expiresAt ?? parsed.expires_at ?? '',
+          })
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    const storedDeliveryAddress = window.localStorage.getItem(STORAGE_KEYS.deliveryAddress)
+    if (storedDeliveryAddress) {
+      setDeliveryAddress(storedDeliveryAddress)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+    if (!session?.id) {
+      resetTrackingState()
+      setSessionHydrationTick(0)
+      return
+    }
+
+    const hydrateDeposits = () => {
+      if (!session?.id) {
+        return
+      }
+      let parsed: StoredDeposit[] = []
+      const key = scopedKey(STORAGE_KEYS.deposits, session.id)
+      const raw = window.localStorage.getItem(key)
+      if (raw) {
+        try {
+          const json = JSON.parse(raw)
+          if (Array.isArray(json)) {
+            parsed = json
+              .filter((entry): entry is StoredDeposit => typeof entry?.id === 'string')
+              .map((entry) => ({ id: entry.id, pickupToken: entry.pickupToken ?? null }))
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!parsed.length) {
+        const legacyKey = window.localStorage.getItem(STORAGE_KEYS.deposits)
+        if (legacyKey) {
+          try {
+            const legacyParsed = JSON.parse(legacyKey)
+            if (Array.isArray(legacyParsed)) {
+              parsed = legacyParsed
+                .filter((entry): entry is StoredDeposit => typeof entry?.id === 'string')
+                .map((entry) => ({ id: entry.id, pickupToken: entry.pickupToken ?? null }))
+            }
+          } catch {
+            /* ignore */
+          }
+          if (parsed.length) {
+            persistDeposits(parsed, session.id)
+            window.localStorage.removeItem(STORAGE_KEYS.deposits)
+          }
+        }
+      }
+      if (!parsed.length) {
+        const legacy = window.localStorage.getItem(STORAGE_KEYS.legacyDeposit)
+        if (legacy) {
+          try {
+            const legacyParsed = JSON.parse(legacy)
+            if (legacyParsed && typeof legacyParsed === 'object' && typeof legacyParsed.id === 'string') {
+              parsed = [{ id: legacyParsed.id, pickupToken: legacyParsed.pickupToken ?? null }]
+            } else {
+              parsed = [{ id: legacy }]
+            }
+          } catch {
+            parsed = [{ id: legacy }]
+          }
+          window.localStorage.removeItem(STORAGE_KEYS.legacyDeposit)
+        }
+      }
+      if (parsed.length) {
+        persistDeposits(parsed, session.id)
+      }
+      setDeposits(parsed)
+      setSelectedDepositId((current) => {
+        if (current && parsed.some((entry) => entry.id === current)) {
+          return current
+        }
+        return parsed[0]?.id ?? null
+      })
+    }
+
+    const hydrateWithdrawals = () => {
+      if (!session?.id) {
+        return
+      }
+      let parsed: StoredWithdrawal[] = []
+      const key = scopedKey(STORAGE_KEYS.withdrawals, session.id)
+      const raw = window.localStorage.getItem(key)
+      if (raw) {
+        try {
+          const json = JSON.parse(raw)
+          if (Array.isArray(json)) {
+            parsed = json.filter((entry): entry is StoredWithdrawal => typeof entry?.id === 'string')
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!parsed.length) {
+        const legacyKey = window.localStorage.getItem(STORAGE_KEYS.withdrawals)
+        if (legacyKey) {
+          try {
+            const legacyParsed = JSON.parse(legacyKey)
+            if (Array.isArray(legacyParsed)) {
+              parsed = legacyParsed.filter((entry): entry is StoredWithdrawal => typeof entry?.id === 'string')
+            }
+          } catch {
+            /* ignore */
+          }
+          if (parsed.length) {
+            persistWithdrawals(parsed, session.id)
+            window.localStorage.removeItem(STORAGE_KEYS.withdrawals)
+          }
+        }
+      }
+      if (!parsed.length) {
+        const legacy = window.localStorage.getItem(STORAGE_KEYS.legacyWithdrawal)
+        if (legacy) {
+          parsed = [{ id: legacy }]
+          window.localStorage.removeItem(STORAGE_KEYS.legacyWithdrawal)
+        }
+      }
+      if (parsed.length) {
+        persistWithdrawals(parsed, session.id)
+      }
+      setWithdrawals(parsed)
+      setSelectedWithdrawalId((current) => {
+        if (current && parsed.some((entry) => entry.id === current)) {
+          return current
+        }
+        return parsed[0]?.id ?? null
+      })
+    }
+
+    hydrateDeposits()
+    hydrateWithdrawals()
+    setSessionHydrationTick((prev) => prev + 1)
+
+  }, [session])
+
+  useEffect(() => {
+    if (flow !== 'withdrawal') {
+      setTokenMintInfo(null)
+    }
+  }, [flow])
+
+  useEffect(() => {
+    if (!resumeFlowHint || sessionHydrationTick === 0) {
+      return
+    }
+    if (deposits.length === 0 && withdrawals.length > 0) {
+      setFlow('withdrawal')
+    }
+    setResumeFlowHint(false)
+  }, [resumeFlowHint, sessionHydrationTick, deposits.length, withdrawals.length])
+
+  const rememberDeposit = (id: string, pickupToken: string) => {
+    if (!session?.id) {
+      return
+    }
+    setDeposits((current) => {
+      const next = [{ id, pickupToken }, ...current.filter((entry) => entry.id !== id)]
+      persistDeposits(next, session.id)
+      return next
+    })
+    setSelectedDepositId(id)
+  }
+
+  const rememberWithdrawalId = (id: string) => {
+    if (!session?.id) {
+      return
+    }
+    setWithdrawals((current) => {
+      const next = [{ id }, ...current.filter((entry) => entry.id !== id)]
+      persistWithdrawals(next, session.id)
+      return next
+    })
+    setSelectedWithdrawalId(id)
+  }
+
+  const clearDepositId = () => {
+    if (!selectedDepositId) {
+      return
+    }
+    pickupMutation.reset()
+    setDeposits((current) => {
+      const next = current.filter((entry) => entry.id !== selectedDepositId)
+      persistDeposits(next, session?.id)
+      setSelectedDepositId(next[0]?.id ?? null)
+      return next
+    })
+  }
+
+  const clearWithdrawalId = () => {
+    if (!selectedWithdrawalId) {
+      return
+    }
+    setWithdrawals((current) => {
+      const next = current.filter((entry) => entry.id !== selectedWithdrawalId)
+      persistWithdrawals(next, session?.id)
+      setSelectedWithdrawalId(next[0]?.id ?? null)
+      return next
+    })
+  }
+
+  const handleDepositPickup = () => {
+    if (!selectedDepositId) {
+      return
+    }
+    if (!sessionToken) {
+      setMessage('Start or resume a session before revealing tokens.')
+      return
+    }
+    const selected = deposits.find((entry) => entry.id === selectedDepositId)
+    if (!selected?.pickupToken) {
+      return
+    }
+    pickupMutation.mutate({ id: selectedDepositId, pickupToken: selected.pickupToken })
+  }
+
+  const handleDeliveryAddressChange = (value: string) => {
+    setDeliveryAddress(value)
+    if (typeof window === 'undefined') {
+      return
+    }
+    if (value) {
+      window.localStorage.setItem(STORAGE_KEYS.deliveryAddress, value)
+    } else {
+      window.localStorage.removeItem(STORAGE_KEYS.deliveryAddress)
+    }
+  }
+
+  const {
+    data: latestDeposit,
+    error: depositError,
+    isFetching: depositLoading,
+  } = useQuery({
+    queryKey: ['deposit', selectedDepositId, sessionToken],
+    queryFn: () => getDeposit(selectedDepositId as string, sessionToken ?? undefined),
+    enabled: Boolean(selectedDepositId && sessionToken),
+    refetchInterval: STATUS_REFRESH_MS,
+  })
+
+  const {
+    data: latestWithdrawal,
+    error: withdrawalError,
+    isFetching: withdrawalLoading,
+  } = useQuery({
+    queryKey: ['withdrawal', selectedWithdrawalId, sessionToken],
+    queryFn: () => getWithdrawal(selectedWithdrawalId as string, sessionToken ?? undefined),
+    enabled: Boolean(selectedWithdrawalId && sessionToken),
+    refetchInterval: STATUS_REFRESH_MS,
+  })
+
+  useEffect(() => {
+    if (depositError) {
+      maybeHandleSessionAuthError(depositError)
+    }
+    if (withdrawalError) {
+      maybeHandleSessionAuthError(withdrawalError)
+    }
+  }, [depositError, withdrawalError])
+
+  const pickupMutation = useMutation({
+    mutationFn: ({ id, pickupToken }: { id: string; pickupToken: string }) =>
+      pickupDeposit(id, pickupToken, sessionToken ?? undefined),
+    onSuccess: async (resp, variables) => {
+      if (resp?.token) {
+        const copied = await copyTextWithFallback(resp.token)
+        if (copied) {
+          setMessage('Token revealed and copied to clipboard')
+        } else {
+          setMessage('Token revealed (copy failed, use the copy button)')
+        }
+      } else {
+        setMessage('Token revealed')
+      }
+      if (variables?.id) {
+        queryClient.invalidateQueries({ queryKey: ['deposit', variables.id] })
+        setDeposits((current) => {
+          const updated = current.map((entry) =>
+            entry.id === variables.id ? { ...entry, pickupToken: null } : entry
+          )
+          persistDeposits(updated, session?.id)
+          return updated
+        })
+      }
+    },
+    onError: (err: unknown) => {
+      if (maybeHandleSessionAuthError(err)) {
+        return
+      }
+      const normalized = normalizeError(err)
+      if (normalized) {
+        setMessage(normalized.message)
+      }
+    },
+  })
+
+  const handleStartSession = async () => {
+    setSessionBusy(true)
+    setMessage(null)
+    try {
+      const response = await startSession()
+      applySessionPayload(response)
+      setResumeCode('')
+      setMessage('New work session started. Write down your claim code to resume later.')
+    } catch (err) {
+      if (err instanceof ApiClientError) {
+        setMessage(`API error (${err.status}): ${err.message}`)
+      } else {
+        setMessage(`Session error: ${(err as Error).message}`)
+      }
+    } finally {
+      setSessionBusy(false)
+    }
+  }
+
+  const handleResumeSession = async (evt: FormEvent<HTMLFormElement>) => {
+    evt.preventDefault()
+    const trimmed = resumeCode.trim()
+    if (!trimmed) {
+      setMessage('Enter your claim code to resume a session.')
+      return
+    }
+    setSessionBusy(true)
+    setMessage(null)
+    try {
+      const response = await resumeSession(trimmed)
+      applySessionPayload(response, { resumed: true })
+      setResumeCode('')
+      setMessage('Session resumed. Header will refresh automatically.')
+    } catch (err) {
+      if (!maybeHandleSessionAuthError(err)) {
+        if (err instanceof ApiClientError) {
+          setMessage(`API error (${err.status}): ${err.message}`)
+        } else {
+          setMessage(`Session error: ${(err as Error).message}`)
+        }
+      }
+    } finally {
+      setSessionBusy(false)
+    }
+  }
+
+  const handleEndSession = () => {
+    dropSession('Session cleared. Start a new one when you’re ready.')
+  }
+
+  const handleCopyClaimCode = async () => {
+    if (!session?.claimCode) {
+      return
+    }
+    const copied = await copyTextWithFallback(session.claimCode)
+    if (copied) {
+      setMessage('Claim code copied to clipboard')
+    } else {
+      setMessage('Unable to copy automatically; please copy the claim code manually.')
+    }
+  }
+
+  const handleTokenChange = (value: string) => {
+    setToken(value)
+    const detected = detectTokenMint(value)
+    if (!detected) {
+      setTokenMintInfo(null)
+      return
+    }
+    if ('error' in detected) {
+      setTokenMintInfo({ error: detected.error })
+      return
+    }
+    const expectedMint = config.cashuMintUrl
+    const isForeign = Boolean(expectedMint && detected.mintUrl !== expectedMint)
+    setTokenMintInfo({ mintUrl: detected.mintUrl, isForeign, amount: detected.amount })
+  }
+
+  const handleSubmit = async (evt: FormEvent<HTMLFormElement>) => {
+    evt.preventDefault()
+    setSubmitting(true)
+    setMessage(null)
+
+    try {
+      if (!sessionToken) {
+        throw new Error('Start or resume a session before submitting a request.')
+      }
+      if (flow === 'deposit') {
+        const requestedAmount = Number(depositAmount)
+        if (!Number.isFinite(requestedAmount) || requestedAmount < config.depositMinSats) {
+          throw new Error(
+            `Deposit amount must be at least ${config.depositMinSats.toLocaleString()} sats`
+          )
+        }
+        const selectedTarget = DELIVERY_TARGETS.find((target) => target.id === deliveryTarget)
+        const resolvedHint =
+          deliveryTarget === 'custom'
+            ? customDeliveryHint.trim()
+            : selectedTarget?.hint ?? null
+        const payload = {
+          amount_sats: requestedAmount,
+          metadata: { source: 'ui-proto' },
+          delivery_hint: resolvedHint || undefined,
+        }
+        const creation = await createDeposit(payload, sessionToken)
+        rememberDeposit(creation.deposit.id, creation.pickup_token)
+        setMessage(
+          `Deposit ${creation.deposit.id} → ${creation.deposit.address} (${creation.deposit.state})`
+        )
+      } else {
+        let resolvedAmount = Number(withdrawalAmount)
+        const normalizedAddress = deliveryAddress.trim()
+        if (!normalizedAddress) {
+          throw new Error('Enter a Bitcoin address before submitting the withdrawal.')
+        }
+        if (!isValidBitcoinAddress(normalizedAddress)) {
+          throw new Error('Enter a valid Bitcoin address (bc1…, 1…, or 3…).')
+        }
+        let payload: CreateWithdrawalRequest = {
+          amount_sats: resolvedAmount,
+          delivery_address: normalizedAddress,
+        }
+
+        if (withdrawalMethod === 'token') {
+          const trimmed = token.trim()
+          if (!trimmed) {
+            throw new Error('Provide a Cashu token or switch to payment requests')
+          }
+
+          const decodedAmount = tokenMintInfo && !('error' in tokenMintInfo) ? tokenMintInfo.amount : null
+          if (decodedAmount !== null) {
+            resolvedAmount = decodedAmount
+            if (resolvedAmount < config.withdrawalMinSats) {
+              throw new Error(
+                `Token value must be at least ${config.withdrawalMinSats.toLocaleString()} sats`
+              )
+            }
+          } else {
+            resolvedAmount = config.withdrawalMinSats
+          }
+
+          payload.amount_sats = resolvedAmount
+          payload.token = trimmed
+        } else {
+          if (resolvedAmount <= 0 || Number.isNaN(resolvedAmount)) {
+            throw new Error('Withdrawal amount must be greater than zero')
+          }
+          if (resolvedAmount < config.withdrawalMinSats) {
+            throw new Error(
+              `Withdrawal amount must be at least ${config.withdrawalMinSats.toLocaleString()} sats`
+            )
+          }
+          payload.amount_sats = resolvedAmount
+          payload.create_payment_request = true
+        }
+
+        const withdrawal = await createWithdrawal(payload, sessionToken)
+        rememberWithdrawalId(withdrawal.id)
+        setMessage(
+          `Withdrawal ${withdrawal.id} → ${withdrawal.delivery_address} (${withdrawal.state})`
+        )
+      }
+    } catch (err) {
+      if (maybeHandleSessionAuthError(err)) {
+        return
+      }
+      if (err instanceof ApiClientError) {
+        setMessage(`API error (${err.status}): ${err.message}`)
+      } else {
+        setMessage(`Request error: ${(err as Error).message}`)
+      }
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const withdrawalMinimum = config.withdrawalMinSats
+  const decodedTokenAmount =
+    tokenMintInfo && !('error' in tokenMintInfo) ? tokenMintInfo.amount : null
+  const tokenBelowMinimum = Boolean(
+    decodedTokenAmount !== null && decodedTokenAmount < withdrawalMinimum
+  )
+  const hasTokenDetectionError = Boolean(tokenMintInfo && 'error' in tokenMintInfo)
+
+  const pickupError = pickupMutation.isError
+    ? normalizeError(pickupMutation.error)
+    : null
+
+  const selectedDeposit = selectedDepositId
+    ? deposits.find((entry) => entry.id === selectedDepositId) ?? null
+    : null
+
+  const hasSession = Boolean(session)
+  const headerTitle = hasSession ? 'Manage your sats float' : 'Start a work session'
+  const headerDescription = hasSession
+    ? 'Simple kiosk-ready interface for funding Cashu wallets from on-chain bitcoin and redeeming ecash back to addresses.'
+    : 'Sessions keep each kiosk run scoped. Start or resume to track deposits and withdrawals under one claim code.'
+  const showModeToggle = hasSession
+  const sessionExpiryText = session?.expiresAt ? new Date(session.expiresAt).toLocaleString() : 'soon'
+  const sessionSummaryCard = session ? (
+    <div className="session-summary-card">
+      <div>
+        <p className="eyebrow">Active session</p>
+        <p className="claim-code">
+          Claim code: <code>{session.claimCode}</code>
+        </p>
+        <p className="helper">Expires {sessionExpiryText}</p>
+      </div>
+      <div className="session-actions">
+        <button type="button" onClick={handleCopyClaimCode}>
+          Copy code
+        </button>
+        <button type="button" onClick={handleEndSession} disabled={sessionBusy}>
+          End session
+        </button>
+      </div>
+    </div>
+  ) : null
+  const panelClassName = hasSession ? 'panel' : 'panel session-only'
+
+  return (
+    <main className="app-shell">
+      <header>
+        <div>
+          <p className="eyebrow">shuestand · cashu ↔ bitcoin</p>
+          <h1>{headerTitle}</h1>
+          <p className="lede">{headerDescription}</p>
+        </div>
+        <div className="header-actions">
+          <div className="theme-toggle" role="group" aria-label="Color theme">
+            <button
+              type="button"
+              className={theme === 'light' ? 'active' : ''}
+              onClick={() => onThemeSelect('light')}
+            >
+              Day
+            </button>
+            <button
+              type="button"
+              className={theme === 'dark' ? 'active' : ''}
+              onClick={() => onThemeSelect('dark')}
+            >
+              Night
+            </button>
+          </div>
+          <button
+            type="button"
+            className="link-button"
+            onClick={() => navigate('/operator')}
+          >
+            Operator console
+          </button>
+          {showModeToggle && (
+            <div className="mode-toggle">
+              <button
+                className={flow === 'deposit' ? 'active' : ''}
+                onClick={() => setFlow('deposit')}
+                type="button"
+              >
+                Bitcoin → Cashu
+              </button>
+              <button
+                className={flow === 'withdrawal' ? 'active' : ''}
+                onClick={() => setFlow('withdrawal')}
+                type="button"
+              >
+                Cashu → Bitcoin
+              </button>
+            </div>
+          )}
+        </div>
+      </header>
+
+      <section className={panelClassName}>
+        {!hasSession ? (
+          <div className="session-card hero">
+            <p className="eyebrow">Work session</p>
+            <h2>Start or resume to continue</h2>
+            <p className="helper lead">
+              Every kiosk or operator action belongs to a work session so you can pause, resume, and audit safely.
+            </p>
+            <div className="session-actions-large">
+              <button
+                type="button"
+                onClick={handleStartSession}
+                disabled={sessionBusy}
+              >
+                {sessionBusy ? 'Starting…' : 'Start new session'}
+              </button>
+              <form className="resume-form" onSubmit={handleResumeSession}>
+                <label>
+                  Claim code
+                  <input
+                    type="text"
+                    value={resumeCode}
+                    onChange={(e) => setResumeCode(e.target.value)}
+                    placeholder="ABCD-EFGH-IJKL-MNOP"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  disabled={sessionBusy || !resumeCode.trim()}
+                >
+                  Resume session
+                </button>
+              </form>
+            </div>
+            <p className="helper subtle">Claim codes expire automatically — copy them somewhere safe.</p>
+            {message && <p className="message">{message}</p>}
+          </div>
+        ) : (
+          <>
+            <div className="workspace-column">
+              {sessionSummaryCard}
+              <form onSubmit={handleSubmit}>
+              {flow === 'deposit' ? (
+                <>
+                  <label>
+                    Amount (sats)
+                    <input
+                      type="number"
+                      min={config.depositMinSats}
+                      value={depositAmount}
+                      onChange={(e) => setDepositAmount(e.target.value)}
+                      required
+                    />
+                    <span className="helper">Minimum {config.depositMinSats.toLocaleString()} sats</span>
+                  </label>
+                  <label>
+                    Delivery target (optional)
+                    <select
+                      value={deliveryTarget}
+                      onChange={(e) => setDeliveryTarget(e.target.value)}
+                    >
+                      {DELIVERY_TARGETS.map((target) => (
+                        <option key={target.id} value={target.id}>
+                          {target.label}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="helper">
+                      {
+                        DELIVERY_TARGETS.find((target) => target.id === deliveryTarget)
+                          ?.description
+                      }
+                    </span>
+                  </label>
+                  {deliveryTarget === 'custom' && (
+                    <label>
+                      Custom delivery URL
+                      <input
+                        type="text"
+                        value={customDeliveryHint}
+                        onChange={(e) => setCustomDeliveryHint(e.target.value)}
+                        placeholder="cashu://wallet/… or https://webhook"
+                      />
+                    </label>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div className="method-toggle">
+                    <span>Submission method</span>
+                    <div className="method-options">
+                      <label>
+                        <input
+                          type="radio"
+                          name="withdrawal-method"
+                          value="token"
+                          checked={withdrawalMethod === 'token'}
+                          onChange={() => setWithdrawalMethod('token')}
+                        />
+                        Paste token
+                      </label>
+                      <label>
+                        <input
+                          type="radio"
+                          name="withdrawal-method"
+                          value="payment_request"
+                          checked={withdrawalMethod === 'payment_request'}
+                          onChange={() => setWithdrawalMethod('payment_request')}
+                        />
+                        Cashu payment request
+                      </label>
+                    </div>
+                  </div>
+                  {withdrawalMethod === 'payment_request' && (
+                    <label>
+                      Amount (sats)
+                      <input
+                        type="number"
+                        min={config.withdrawalMinSats}
+                        value={withdrawalAmount}
+                        onChange={(e) => setWithdrawalAmount(e.target.value)}
+                        required={withdrawalMethod === 'payment_request'}
+                      />
+                      <span className="helper">
+                        Minimum {config.withdrawalMinSats.toLocaleString()} sats
+                      </span>
+                    </label>
+                  )}
+                  {withdrawalMethod === 'token' ? (
+                    <label>
+                      Cashu token
+                      <textarea
+                        value={token}
+                        onChange={(e) => handleTokenChange(e.target.value)}
+                        rows={5}
+                        placeholder="Paste ecash token here"
+                        required={withdrawalMethod === 'token'}
+                      />
+                      {hasTokenDetectionError && tokenMintInfo && 'error' in tokenMintInfo && (
+                        <span className="helper warning">{tokenMintInfo.error}</span>
+                      )}
+                      {decodedTokenAmount !== null && tokenMintInfo && !('error' in tokenMintInfo) && (
+                        <span
+                          className={`helper ${
+                            tokenMintInfo.isForeign || tokenBelowMinimum ? 'warning' : 'success'
+                          }`}
+                        >
+                          {tokenBelowMinimum
+                            ? `Token value is ${decodedTokenAmount.toLocaleString()} sats, but withdrawals require at least ${withdrawalMinimum.toLocaleString()} sats.`
+                            : tokenMintInfo.isForeign
+                              ? `Foreign token detected (${tokenMintInfo.mintUrl}); will be swapped to the Shuestand mint first. Value: ${decodedTokenAmount.toLocaleString()} sats.`
+                              : `Mint detected: ${tokenMintInfo.mintUrl}. Value: ${decodedTokenAmount.toLocaleString()} sats.`}
+                        </span>
+                      )}
+                    </label>
+                  ) : (
+                    <div className="helper">
+                      We'll create a NUT-18 Cashu payment request so you can scan a QR code
+                      instead of pasting a token.
+                    </div>
+                  )}
+                  <label>
+                    Bitcoin address
+                    <input
+                      type="text"
+                      value={deliveryAddress}
+                      onChange={(e) => handleDeliveryAddressChange(e.target.value)}
+                      placeholder="bc1q..."
+                      required
+                    />
+                  </label>
+                </>
+              )}
+
+              <button type="submit" disabled={isSubmitting}>
+                {isSubmitting ? 'Submitting…' : 'Submit request'}
+              </button>
+            </form>
+            </div>
+
+            <aside>
+              <h2>Status</h2>
+              <p>
+                Backend: <code>{config.apiBase}</code>
+              </p>
+              <p className={message ? 'message' : 'message muted'}>
+                {message ?? 'Awaiting action'}
+              </p>
+
+              {flow === 'deposit' ? (
+                <>
+                  {deposits.length > 0 && (
+                    <label className="status-select">
+                      Tracked deposits
+                      <select
+                        value={selectedDepositId ?? ''}
+                        onChange={(e) => setSelectedDepositId(e.target.value || null)}
+                      >
+                        {deposits.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.id}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <DepositStatusCard
+                    deposit={latestDeposit}
+                    error={normalizeError(depositError)}
+                    isLoading={depositLoading}
+                    hasSubmission={Boolean(selectedDepositId)}
+                    pickupToken={selectedDeposit?.pickupToken ?? null}
+                    onPickup={handleDepositPickup}
+                    pickupPending={pickupMutation.isPending}
+                    pickupError={pickupError}
+                    onClear={deposits.length ? clearDepositId : undefined}
+                  />
+                </>
+              ) : (
+                <>
+                  {withdrawals.length > 0 && (
+                    <label className="status-select">
+                      Tracked withdrawals
+                      <select
+                        value={selectedWithdrawalId ?? ''}
+                        onChange={(e) => setSelectedWithdrawalId(e.target.value || null)}
+                      >
+                        {withdrawals.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.id}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <WithdrawalStatusCard
+                    withdrawal={latestWithdrawal}
+                    error={normalizeError(withdrawalError)}
+                    isLoading={withdrawalLoading}
+                    hasSubmission={Boolean(selectedWithdrawalId)}
+                  />
+                  {selectedWithdrawalId && (
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={clearWithdrawalId}
+                    >
+                      Archive this withdrawal
+                    </button>
+                  )}
+                </>
+              )}
+            </aside>
+          </>
+        )}
+      </section>
+    </main>
+  )
+}

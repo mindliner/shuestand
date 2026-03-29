@@ -362,7 +362,11 @@ form button:disabled {
   background: linear-gradient(120deg, #6cebc4, #46aef7);
   color: #05060a;
   border: none;
-  padding-inline: 2.2rem;
+  border-radius: 999px;
+  padding: 0.95rem 2.4rem;
+  font-size: 1rem;
+  font-weight: 600;
+  box-shadow: 0 12px 24px rgba(6, 15, 22, 0.35);
 }
 
 .session-actions-large > button[type='button']:disabled {
@@ -464,6 +468,27 @@ aside h2 {
   padding: 1rem;
   margin-top: 1rem;
   background: var(--color-panel-contrast);
+}
+
+.status-block button:not(.copy-btn):not(.link-button) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.85rem 1.6rem;
+  min-height: 44px;
+  border-radius: 999px;
+  border: none;
+  background: linear-gradient(120deg, #6cebc4, #46aef7);
+  color: #05060a;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 10px 22px rgba(6, 15, 22, 0.3);
+}
+
+.status-block button:not(.copy-btn):not(.link-button):disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .status-block h3 {

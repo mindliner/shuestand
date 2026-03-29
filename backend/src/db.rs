@@ -221,6 +221,30 @@ impl Database {
         rows.into_iter().map(Self::map_withdrawal).collect()
     }
 
+    pub async fn update_withdrawal_chain_state(
+        &self,
+        id: &str,
+        next_state: WithdrawalState,
+    ) -> Result<(), Error> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"UPDATE withdrawals
+            SET state = $2,
+                updated_at = $3
+            WHERE id = $1"#,
+        )
+        .bind(id)
+        .bind(next_state.as_str())
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+        Ok(())
+    }
+
     pub async fn manual_update_withdrawal_state(
         &self,
         id: &str,
