@@ -57,6 +57,7 @@ pub struct AppConfig {
     pub withdrawal_min_sats: u64,
     pub float_drift_alert_ratio: f32,
     pub single_request_cap_ratio: f64,
+    pub float_alert_webhook_url: Option<String>,
 }
 
 impl AppConfig {
@@ -197,6 +198,7 @@ impl AppConfig {
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|v| (0.0..=1.0).contains(v))
             .unwrap_or(DEFAULT_SINGLE_REQUEST_RATIO);
+        let float_alert_webhook_url = std::env::var("FLOAT_ALERT_WEBHOOK_URL").ok();
 
         if bitcoin_wallet_seed.is_some()
             && (bitcoin_descriptor.is_none()
@@ -252,6 +254,7 @@ impl AppConfig {
             withdrawal_min_sats,
             float_drift_alert_ratio,
             single_request_cap_ratio,
+            float_alert_webhook_url,
         }
     }
 }

@@ -98,6 +98,8 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   const [sessionHydrationTick, setSessionHydrationTick] = useState(0)
   const [limits, setLimits] = useState(() => ({
     withdrawalMinSats: config.withdrawalMinSats,
+    depositFlowEnabled: true,
+    depositFlowReason: null as string | null,
   }))
   const navigate = useNavigate()
 
@@ -202,12 +204,26 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           return
         }
         const min = Number(runtime.withdrawal_min_sats)
-        if (Number.isFinite(min) && min > 0) {
-          setLimits((current) =>
-            current.withdrawalMinSats === min
-              ? current
-              : { ...current, withdrawalMinSats: min }
-          )
+        const resolvedMin = Number.isFinite(min) && min > 0 ? min : undefined
+        const depositFlowEnabled = runtime.deposit_flow_enabled !== false
+        const depositFlowReason = runtime.deposit_flow_reason ?? null
+        setLimits((current) => {
+          const next = {
+            withdrawalMinSats: resolvedMin ?? current.withdrawalMinSats,
+            depositFlowEnabled,
+            depositFlowReason,
+          }
+          if (
+            next.withdrawalMinSats === current.withdrawalMinSats &&
+            next.depositFlowEnabled === current.depositFlowEnabled &&
+            next.depositFlowReason === current.depositFlowReason
+          ) {
+            return current
+          }
+          return next
+        })
+        if (!depositFlowEnabled) {
+          setFlow((current) => (current === 'deposit' ? 'withdrawal' : current))
         }
       } catch (err) {
         console.warn('Failed to load runtime config', err)
@@ -697,6 +713,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
         throw new Error('Start or resume a session before submitting a request.')
       }
       if (flow === 'deposit') {
+        if (depositFlowDisabled) {
+          throw new Error(depositDisabledMessage)
+        }
         const requestedAmount = Number(depositAmount)
         if (!Number.isFinite(requestedAmount) || requestedAmount < config.depositMinSats) {
           throw new Error(
@@ -792,6 +811,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     decodedTokenAmount !== null && decodedTokenAmount < withdrawalMinimum
   )
   const hasTokenDetectionError = Boolean(tokenMintInfo && 'error' in tokenMintInfo)
+  const depositFlowDisabled = !limits.depositFlowEnabled
+  const depositDisabledMessage =
+    limits.depositFlowReason ?? 'Deposits are temporarily disabled. Please contact the operator.'
 
   const pickupError = pickupMutation.isError
     ? normalizeError(pickupMutation.error)
@@ -802,11 +824,10 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     : null
 
   const hasSession = Boolean(session)
-  const headerTitle = hasSession ? 'Manage your sats float' : 'Start a work session'
+  const headerTitle = hasSession ? 'Configure Your Swaps' : 'Shuestand: Onchain/Cashu Swaps'
   const headerDescription = hasSession
     ? 'Simple kiosk-ready interface for funding Cashu wallets from on-chain bitcoin and redeeming ecash back to addresses.'
     : 'Sessions keep each kiosk run scoped. Start or resume to track deposits and withdrawals under one claim code.'
-  const showModeToggle = hasSession
   const sessionExpiryText = session?.expiresAt ? new Date(session.expiresAt).toLocaleString() : 'soon'
   const sessionSummaryCard = session ? (
     <div className="session-summary-card">
@@ -827,6 +848,36 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
         <button type="button" onClick={handleEndSession} disabled={sessionBusy}>
           End session
         </button>
+      </div>
+      <div className="session-controls">
+        <div className="mode-toggle">
+          <button
+            className={flow === 'deposit' ? 'active' : ''}
+            onClick={() => {
+              if (!depositFlowDisabled) {
+                setFlow('deposit')
+              }
+            }}
+            type="button"
+            disabled={depositFlowDisabled}
+            aria-disabled={depositFlowDisabled}
+          >
+            Bitcoin → Cashu
+          </button>
+          <button
+            className={flow === 'withdrawal' ? 'active' : ''}
+            onClick={() => setFlow('withdrawal')}
+            type="button"
+          >
+            Cashu → Bitcoin
+          </button>
+        </div>
+        {depositFlowDisabled && (
+          <p className="helper warning">⚠️ {depositDisabledMessage}</p>
+        )}
+        <p className="helper subtle backend-endpoint">
+          Backend: <code>{config.apiBase}</code>
+        </p>
       </div>
     </div>
   ) : null
@@ -864,32 +915,14 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           >
             Operator console
           </button>
-          {showModeToggle && (
-            <div className="mode-toggle">
-              <button
-                className={flow === 'deposit' ? 'active' : ''}
-                onClick={() => setFlow('deposit')}
-                type="button"
-              >
-                Bitcoin → Cashu
-              </button>
-              <button
-                className={flow === 'withdrawal' ? 'active' : ''}
-                onClick={() => setFlow('withdrawal')}
-                type="button"
-              >
-                Cashu → Bitcoin
-              </button>
-            </div>
-          )}
         </div>
       </header>
 
       <section className={panelClassName}>
         {!hasSession ? (
-          <div className="session-card hero">
-            <p className="eyebrow">Work session</p>
-            <h2>Start or resume to continue</h2>
+            <div className="session-card hero">
+              <p className="eyebrow">Work session</p>
+            <h2>Start or resume to get going</h2>
             <p className="helper lead">
               Every kiosk or operator action belongs to a work session so you can pause, resume, and audit safely.
             </p>
@@ -924,53 +957,59 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           </div>
         ) : (
           <>
+            {sessionSummaryCard}
             <div className="workspace-column">
-              {sessionSummaryCard}
               <form onSubmit={handleSubmit}>
               {flow === 'deposit' ? (
-                <>
-                  <label>
-                    Amount (sats)
-                    <input
-                      type="number"
-                      min={config.depositMinSats}
-                      value={depositAmount}
-                      onChange={(e) => setDepositAmount(e.target.value)}
-                      required
-                    />
-                    <span className="helper">Minimum {config.depositMinSats.toLocaleString()} sats</span>
-                  </label>
-                  <label>
-                    Delivery target (optional)
-                    <select
-                      value={deliveryTarget}
-                      onChange={(e) => setDeliveryTarget(e.target.value)}
-                    >
-                      {DELIVERY_TARGETS.map((target) => (
-                        <option key={target.id} value={target.id}>
-                          {target.label}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="helper">
-                      {
-                        DELIVERY_TARGETS.find((target) => target.id === deliveryTarget)
-                          ?.description
-                      }
-                    </span>
-                  </label>
-                  {deliveryTarget === 'custom' && (
+                depositFlowDisabled ? (
+                  <div className="notice warning">
+                    <p className="helper lead">{depositDisabledMessage}</p>
+                  </div>
+                ) : (
+                  <>
                     <label>
-                      Custom delivery URL
+                      Amount (sats)
                       <input
-                        type="text"
-                        value={customDeliveryHint}
-                        onChange={(e) => setCustomDeliveryHint(e.target.value)}
-                        placeholder="cashu://wallet/… or https://webhook"
+                        type="number"
+                        min={config.depositMinSats}
+                        value={depositAmount}
+                        onChange={(e) => setDepositAmount(e.target.value)}
+                        required
                       />
+                      <span className="helper">Minimum {config.depositMinSats.toLocaleString()} sats</span>
                     </label>
-                  )}
-                </>
+                    <label>
+                      Delivery target (optional)
+                      <select
+                        value={deliveryTarget}
+                        onChange={(e) => setDeliveryTarget(e.target.value)}
+                      >
+                        {DELIVERY_TARGETS.map((target) => (
+                          <option key={target.id} value={target.id}>
+                            {target.label}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="helper">
+                        {
+                          DELIVERY_TARGETS.find((target) => target.id === deliveryTarget)
+                            ?.description
+                        }
+                      </span>
+                    </label>
+                    {deliveryTarget === 'custom' && (
+                      <label>
+                        Custom delivery URL
+                        <input
+                          type="text"
+                          value={customDeliveryHint}
+                          onChange={(e) => setCustomDeliveryHint(e.target.value)}
+                          placeholder="cashu://wallet/… or https://webhook"
+                        />
+                      </label>
+                    )}
+                  </>
+                )
               ) : (
                 <>
                   <div className="method-toggle">
@@ -1059,7 +1098,10 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                 </>
               )}
 
-              <button type="submit" disabled={isSubmitting}>
+              <button
+                type="submit"
+                disabled={isSubmitting || (flow === 'deposit' && depositFlowDisabled)}
+              >
                 {isSubmitting ? 'Submitting…' : 'Submit request'}
               </button>
             </form>
@@ -1067,9 +1109,6 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
 
             <aside>
               <h2>Status</h2>
-              <p>
-                Backend: <code>{config.apiBase}</code>
-              </p>
               <p className={message ? 'message' : 'message muted'}>
                 {message ?? 'Awaiting action'}
               </p>

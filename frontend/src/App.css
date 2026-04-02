@@ -327,8 +327,10 @@ form button:disabled {
   background: var(--color-panel-contrast);
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 1rem;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
 }
 
 .session-summary-card .claim-code {
@@ -344,6 +346,12 @@ form button:disabled {
   border: 1px solid var(--color-border);
 }
 
+.session-summary-card .session-actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
 .session-summary-card .session-actions button {
   background: transparent;
   border: 1px solid var(--color-toggle-border);
@@ -356,6 +364,17 @@ form button:disabled {
 .session-summary-card .session-actions button:hover {
   border-color: #6cebc4;
   color: #6cebc4;
+}
+
+.session-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 220px;
+}
+
+.session-controls .mode-toggle {
+  align-self: flex-start;
 }
 
 .session-actions-large > button[type='button'] {

@@ -24,6 +24,7 @@ use electrum_client::{
 };
 use reqwest::{Client, StatusCode as HttpStatus};
 use serde::Deserialize;
+use serde_json::json;
 use sqlx::Error;
 use std::{
     net::SocketAddr,
@@ -391,6 +392,7 @@ async fn main() -> Result<(), anyhow::Error> {
         let mode_handle = operation_mode.clone();
         let db_clone = db.clone();
         let auto_drain_threshold = config.withdrawal_min_sats.saturating_mul(2);
+        let alert_webhook = config.float_alert_webhook_url.clone();
 
         tokio::spawn(async move {
             monitor_float_levels(
@@ -406,6 +408,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 auto_drain_threshold,
                 mode_handle,
                 db_clone,
+                alert_webhook,
             )
             .await;
         });
@@ -578,6 +581,7 @@ async fn monitor_float_levels(
     auto_drain_threshold: u64,
     operation_mode: Arc<RwLock<OperationMode>>,
     db: Database,
+    alert_webhook_url: Option<String>,
 ) {
     if target_sats == 0 {
         tracing::warn!(target: "backend", "FLOAT_TARGET_SATS is zero; float guard disabled");
@@ -595,6 +599,8 @@ async fn monitor_float_levels(
             compute_cashu_float(cashu_wallet.as_ref(), target_sats, min_ratio, max_ratio).await;
         metrics.set_cashu_float_ratio(cashu_snapshot.ratio as f64);
 
+        let mut onchain_transition: Option<FloatBand> = None;
+        let mut cashu_transition: Option<FloatBand> = None;
         {
             let mut guard = status.write().await;
             if onchain_snapshot.state != guard.onchain.state {
@@ -605,6 +611,7 @@ async fn monitor_float_levels(
                     onchain_snapshot.balance_sats,
                     target_sats,
                 );
+                onchain_transition = Some(onchain_snapshot.state);
             }
             if cashu_snapshot.state != guard.cashu.state {
                 log_float_transition(
@@ -614,9 +621,45 @@ async fn monitor_float_levels(
                     cashu_snapshot.balance_sats,
                     target_sats,
                 );
+                cashu_transition = Some(cashu_snapshot.state);
             }
             guard.onchain = onchain_snapshot.clone();
             guard.cashu = cashu_snapshot.clone();
+        }
+
+        if let (Some(url), Some(state)) = (alert_webhook_url.as_deref(), onchain_transition) {
+            if let Err(err) = emit_float_band_alert(
+                url,
+                "onchain",
+                state,
+                onchain_snapshot.balance_sats,
+                target_sats,
+            )
+            .await
+            {
+                tracing::warn!(
+                    target: "backend",
+                    error = %err,
+                    "failed to send on-chain float alert"
+                );
+            }
+        }
+        if let (Some(url), Some(state)) = (alert_webhook_url.as_deref(), cashu_transition) {
+            if let Err(err) = emit_float_band_alert(
+                url,
+                "cashu",
+                state,
+                cashu_snapshot.balance_sats,
+                target_sats,
+            )
+            .await
+            {
+                tracing::warn!(
+                    target: "backend",
+                    error = %err,
+                    "failed to send cashu float alert"
+                );
+            }
         }
 
         let total_balance = onchain_snapshot.balance_sats + cashu_snapshot.balance_sats;
@@ -636,6 +679,23 @@ async fn monitor_float_levels(
                         "total float drift exceeded threshold"
                     );
                     drift_alert_active = true;
+                    if let Some(url) = alert_webhook_url.as_deref() {
+                        if let Err(err) = emit_float_drift_alert(
+                            url,
+                            "triggered",
+                            total_balance,
+                            target_sats,
+                            drift,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                target: "backend",
+                                error = %err,
+                                "failed to send drift alert"
+                            );
+                        }
+                    }
                 }
             } else if drift_alert_active {
                 tracing::info!(
@@ -645,6 +705,23 @@ async fn monitor_float_levels(
                     "total float drift back within guard rails"
                 );
                 drift_alert_active = false;
+                if let Some(url) = alert_webhook_url.as_deref() {
+                    if let Err(err) = emit_float_drift_alert(
+                        url,
+                        "cleared",
+                        total_balance,
+                        target_sats,
+                        drift,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            target: "backend",
+                            error = %err,
+                            "failed to send drift recovery alert"
+                        );
+                    }
+                }
             }
         }
 
@@ -804,6 +881,53 @@ fn log_float_transition(
             "float status unknown"
         ),
     }
+}
+
+async fn emit_float_band_alert(
+    url: &str,
+    wallet: &str,
+    state: FloatBand,
+    balance_sats: u64,
+    target_sats: u64,
+) -> Result<(), reqwest::Error> {
+    let payload = json!({
+        "event": "float_band_change",
+        "wallet": wallet,
+        "state": state.as_str(),
+        "balance_sats": balance_sats,
+        "target_sats": target_sats,
+    });
+    post_float_alert(url, payload).await
+}
+
+async fn emit_float_drift_alert(
+    url: &str,
+    state: &str,
+    total_balance_sats: u64,
+    target_sats: u64,
+    drift_sats: i64,
+) -> Result<(), reqwest::Error> {
+    let payload = json!({
+        "event": "float_drift_alert",
+        "state": state,
+        "total_balance_sats": total_balance_sats,
+        "target_sats": target_sats,
+        "drift_sats": drift_sats,
+    });
+    post_float_alert(url, payload).await
+}
+
+async fn post_float_alert(
+    url: &str,
+    payload: serde_json::Value,
+) -> Result<(), reqwest::Error> {
+    Client::new()
+        .post(url)
+        .json(&payload)
+        .send()
+        .await?
+        .error_for_status()
+        .map(|_| ())
 }
 
 async fn process_confirmations(db: &Database, chain: &dyn ChainSource) -> Result<(), TrackerError> {

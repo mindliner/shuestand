@@ -51,6 +51,7 @@ export interface Withdrawal {
   requested_amount_sats?: number | null
   token_value_sats?: number | null
   txid?: string | null
+   error?: string | null
   fee_paid_sats?: number | null
   source_mint_url?: string | null
   is_foreign_mint?: boolean | null
@@ -204,6 +205,8 @@ export interface PublicConfigResponse {
   float_min_ratio: number
   float_max_ratio: number
   single_request_cap_ratio: number
+  deposit_flow_enabled: boolean
+  deposit_flow_reason?: string | null
 }
 
 export type OperationMode = 'normal' | 'drain' | 'halt'

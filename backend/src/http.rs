@@ -56,6 +56,11 @@ const DEFAULT_DEPOSIT_STATES: [DepositState; 6] = [
     DepositState::Ready,
     DepositState::Failed,
 ];
+const CASHU_WALLET_UNAVAILABLE_MESSAGE: &str =
+    "Cashu wallet unavailable; please contact the operator";
+const CASHU_FLOAT_DEPLETED_MESSAGE: &str =
+    "Cashu float is depleted; please contact the operator";
+const DEPOSIT_FLOAT_TOO_LOW_MESSAGE: &str = "Float too low, please contact operator";
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -127,9 +132,38 @@ struct PublicConfigResponse {
     float_min_ratio: f32,
     float_max_ratio: f32,
     single_request_cap_ratio: f64,
+    deposit_flow_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deposit_flow_reason: Option<String>,
 }
 
 async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicConfigResponse> {
+    let (deposit_flow_enabled, deposit_flow_reason) = if state.cashu_wallet.is_none() {
+        (
+            false,
+            Some(CASHU_WALLET_UNAVAILABLE_MESSAGE.to_string()),
+        )
+    } else {
+        let snapshot = state.float_status.read().await.clone();
+        let cashu_balance = snapshot.cashu.balance_sats;
+        if cashu_balance == 0 {
+            (
+                false,
+                Some(CASHU_FLOAT_DEPLETED_MESSAGE.to_string()),
+            )
+        } else {
+            let deposit_cap = ((cashu_balance as f64) * state.single_request_cap_ratio).floor() as u64;
+            if deposit_cap < state.withdrawal_min_sats {
+                (
+                    false,
+                    Some(DEPOSIT_FLOAT_TOO_LOW_MESSAGE.to_string()),
+                )
+            } else {
+                (true, None)
+            }
+        }
+    };
+
     let payload = PublicConfigResponse {
         withdrawal_min_sats: state.withdrawal_min_sats,
         deposit_target_confirmations: state.deposit_target_confirmations,
@@ -137,6 +171,8 @@ async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicCon
         float_min_ratio: state.float_min_ratio,
         float_max_ratio: state.float_max_ratio,
         single_request_cap_ratio: state.single_request_cap_ratio,
+        deposit_flow_enabled,
+        deposit_flow_reason,
     };
 
     Ok(Json(ApiResponse { data: payload }))
@@ -687,6 +723,16 @@ async fn create_deposit(
         return Err(unavailable(
             "cashu float is depleted; please contact the operator",
         ));
+    }
+    if deposit_cap < state.withdrawal_min_sats {
+        tracing::warn!(
+            target: "backend",
+            spendable,
+            deposit_cap,
+            withdrawal_min = state.withdrawal_min_sats,
+            "deposit flow disabled because cap is below the withdrawal minimum"
+        );
+        return Err(unavailable(DEPOSIT_FLOAT_TOO_LOW_MESSAGE));
     }
     if req.amount_sats > deposit_cap {
         tracing::warn!(
