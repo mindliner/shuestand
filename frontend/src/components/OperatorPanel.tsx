@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import {
   createCashuInvoice,
@@ -17,9 +17,11 @@ import {
   operateWithdrawal,
   listOperatorDeposits,
   operateDeposit,
+  getOperationMode,
+  setOperationMode,
 } from '../lib/api'
 import { CopyButton } from './KioskStatusCards'
-import type { FloatStatusResponse, OperatorWithdrawalActionRequest, OperatorDepositActionRequest, Withdrawal, Deposit } from '../types/api'
+import type { FloatStatusResponse, OperatorWithdrawalActionRequest, OperatorDepositActionRequest, Withdrawal, Deposit, OperationMode } from '../types/api'
 
 const formatTokenSnippet = (token: string) => {
   if (token.length <= 120) {
@@ -80,6 +82,15 @@ const TOKEN_STORAGE_KEY = 'shuestand.operatorToken'
 type CleanupAction = OperatorWithdrawalActionRequest['action']
 type DepositCleanupAction = OperatorDepositActionRequest['action']
 
+type OperatorLogEntry = {
+  id: string
+  kind: 'deposit' | 'withdrawal'
+  state: string
+  sessionId?: string | null
+  createdAt?: string | null
+  timestamp: number
+}
+
 export function OperatorPanel() {
   const storedToken =
     typeof window !== 'undefined'
@@ -107,6 +118,9 @@ export function OperatorPanel() {
 
   const [depositNotes, setDepositNotes] = useState<Record<string, string>>({})
 
+  const [logEntries, setLogEntries] = useState<OperatorLogEntry[]>([])
+  const [logLive, setLogLive] = useState(true)
+
   const queryClient = useQueryClient()
 
   const balanceQuery = useQuery({
@@ -128,6 +142,21 @@ export function OperatorPanel() {
     queryFn: () => getWalletTopup(token),
     enabled: Boolean(token),
     refetchInterval: false,
+  })
+
+  const modeQuery = useQuery({
+    queryKey: ['operation-mode', token],
+    queryFn: () => getOperationMode(token),
+    enabled: Boolean(token),
+    refetchInterval: token ? 15000 : false,
+  })
+
+  const modeMutation = useMutation({
+    mutationFn: (nextMode: OperationMode) => setOperationMode(token, nextMode),
+    onSuccess: (res) => {
+      setFeedback(`Operations mode set to ${res.mode}`)
+      queryClient.invalidateQueries({ queryKey: ['operation-mode', token] })
+    },
   })
 
   const syncMutation = useMutation({
@@ -305,6 +334,36 @@ export function OperatorPanel() {
 
   const cleanupItems = cleanupQuery.data ?? []
 
+  const depositItems = depositCleanupQuery.data ?? []
+
+  const computedLogEntries = useMemo(() => {
+    const withdrawals: OperatorLogEntry[] = cleanupItems.map((wd) => ({
+      id: wd.id,
+      kind: 'withdrawal',
+      state: wd.state,
+      sessionId: wd.session_id ?? null,
+      createdAt: wd.created_at ?? null,
+      timestamp: wd.created_at ? new Date(wd.created_at).getTime() : 0,
+    }))
+    const deposits: OperatorLogEntry[] = depositItems.map((dep) => ({
+      id: dep.id,
+      kind: 'deposit',
+      state: dep.state,
+      sessionId: dep.session_id ?? null,
+      createdAt: dep.created_at ?? null,
+      timestamp: dep.created_at ? new Date(dep.created_at).getTime() : 0,
+    }))
+    return [...withdrawals, ...deposits].sort((a, b) => b.timestamp - a.timestamp)
+  }, [cleanupItems, depositItems])
+
+  useEffect(() => {
+    if (logLive) {
+      setLogEntries(computedLogEntries)
+    }
+  }, [computedLogEntries, logLive])
+
+  const handleManualLogRefresh = () => setLogEntries(computedLogEntries)
+
   const handleCleanupNoteChange = (id: string, value: string) => {
     setCleanupNotes((prev) => {
       if (!value) {
@@ -349,8 +408,6 @@ export function OperatorPanel() {
     cleanupMutation.mutate({ id: withdrawal.id, payload })
   }
 
-  const depositItems = depositCleanupQuery.data ?? []
-
   const handleDepositNoteChange = (id: string, value: string) => {
     setDepositNotes((prev) => {
       if (!value) {
@@ -391,6 +448,27 @@ export function OperatorPanel() {
     activeQuoteId && invoice && invoice.state?.toLowerCase() === 'paid',
   )
 
+  const modeOptions: { value: OperationMode; label: string }[] = [
+    { value: 'normal', label: 'Normal' },
+    { value: 'drain', label: 'Drain' },
+    { value: 'halt', label: 'Halt' },
+  ]
+
+  const modeDescriptions: Record<OperationMode, string> = {
+    normal: 'Accept new deposits and withdrawals. Background workers run normally.',
+    drain: 'Finish existing deposits/withdrawals but reject new ones until you resume.',
+    halt: 'Pause all processing. Existing jobs stay visible but workers are idle.',
+  }
+
+  const currentMode: OperationMode = modeQuery.data?.mode ?? 'normal'
+
+  const handleModeChange = (next: OperationMode) => {
+    if (!token || currentMode === next) {
+      return
+    }
+    modeMutation.mutate(next)
+  }
+
   return (
     <div className="operator-panel">
       <section className="operator-card">
@@ -414,6 +492,47 @@ export function OperatorPanel() {
 
       {token && (
         <>
+          <section className="operator-card">
+            <div className="operator-card-header">
+              <h3>Operations mode</h3>
+              {!modeQuery.isLoading && !modeQuery.isError && (
+                <span className={`status-pill ${currentMode}`}>
+                  {currentMode}
+                </span>
+              )}
+            </div>
+            {modeQuery.isLoading ? (
+              <p>Loading…</p>
+            ) : modeQuery.isError ? (
+              <p className="status-error">{(modeQuery.error as Error).message}</p>
+            ) : (
+              <>
+                <p>{modeDescriptions[currentMode]}</p>
+                <div className="button-row segmented">
+                  {modeOptions.map(({ value, label }) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={value === currentMode ? 'primary' : 'secondary'}
+                      onClick={() => handleModeChange(value)}
+                      disabled={modeMutation.isPending || value === currentMode}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {modeMutation.isPending && (
+                  <p className="status-meta">Updating mode…</p>
+                )}
+                {modeMutation.isError && (
+                  <p className="status-error">
+                    {(modeMutation.error as Error).message}
+                  </p>
+                )}
+              </>
+            )}
+          </section>
+
           <section className="operator-card">
             <div className="operator-card-header">
               <h3>Ledger & reconciliation</h3>
@@ -489,6 +608,57 @@ export function OperatorPanel() {
               </>
             ) : (
               <p>No ledger data yet.</p>
+            )}
+          </section>
+
+          <section className="operator-card">
+            <div className="operator-card-header">
+              <h3>Activity log</h3>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={logLive}
+                  onChange={(e) => {
+                    const next = e.target.checked
+                    setLogLive(next)
+                    if (next) {
+                      setLogEntries(computedLogEntries)
+                    }
+                  }}
+                />
+                Live
+              </label>
+              {!logLive && (
+                <button type="button" onClick={handleManualLogRefresh}>
+                  Update now
+                </button>
+              )}
+            </div>
+            {logEntries.length === 0 ? (
+              <p>No deposits or withdrawals are in flight.</p>
+            ) : (
+              <ul className="operator-log">
+                {logEntries.map((entry) => (
+                  <li key={`${entry.kind}-${entry.id}`} className="operator-log-entry">
+                    <div className="stacked">
+                      <span className="status-meta">
+                        {entry.createdAt
+                          ? new Date(entry.createdAt).toLocaleTimeString()
+                          : '—'}
+                      </span>
+                      <span className="status-meta">
+                        Session {entry.sessionId ?? '—'}
+                      </span>
+                    </div>
+                    <div className="log-entry-body">
+                      <strong>
+                        {entry.kind === 'withdrawal' ? 'Withdrawal' : 'Deposit'} {entry.id}
+                      </strong>
+                      <span className="status-pill">{entry.state}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
             )}
           </section>
 

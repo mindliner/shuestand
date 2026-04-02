@@ -95,7 +95,7 @@ impl AppConfig {
         let deposit_target_confirmations = std::env::var("DEPOSIT_TARGET_CONFIRMATIONS")
             .ok()
             .and_then(|v| v.parse::<u8>().ok())
-            .filter(|v| *v > 0)
+            .map(|v| v.max(1))
             .unwrap_or(DEFAULT_DEPOSIT_TARGET_CONFIRMATIONS);
         let withdrawal_target_confirmations = std::env::var("WITHDRAWAL_TARGET_CONFIRMATIONS")
             .ok()

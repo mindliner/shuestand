@@ -54,7 +54,7 @@ impl MintSwapService {
     ) -> anyhow::Result<MintSwapOutcome> {
         let foreign_wallet = self.manager.wallet_for_mint(foreign_mint_url).await?;
         let original_amount = self
-            .receive_foreign_token(&foreign_wallet, token_raw, expected_amount)
+            .receive_foreign_token(&foreign_wallet, foreign_mint_url, token_raw, expected_amount)
             .await?;
         if original_amount == 0 {
             return Err(anyhow!("foreign token had zero value"));
@@ -85,7 +85,7 @@ impl MintSwapService {
                 let guard = canonical_wallet.lock().await;
                 guard
                     .mint_quote(
-                        KnownMethod::Bolt11,
+                        PaymentMethod::Known(KnownMethod::Bolt11),
                         Some(Amount::from(target_amount)),
                         None,
                         None,
@@ -198,6 +198,7 @@ impl MintSwapService {
     async fn receive_foreign_token(
         &self,
         wallet: &WalletHandle,
+        mint_url: &str,
         token_raw: &str,
         expected_amount: Option<u64>,
     ) -> anyhow::Result<u64> {
@@ -211,6 +212,15 @@ impl MintSwapService {
             Ok(amount) => Ok(amount.to_u64()),
             Err(err) => {
                 let message = err.to_string();
+                if message.contains("Invalid DLEQ proof") {
+                    tracing::warn!(
+                        target: "backend",
+                        mint_url = %mint_url,
+                        token_chars = token_raw.len(),
+                        expected_amount_sats = expected_amount.unwrap_or(0),
+                        "foreign mint rejected token due to invalid DLEQ proof"
+                    );
+                }
                 if let Some(expected) = expected_amount {
                     if message.contains("Token Already Spent") {
                         tracing::warn!(

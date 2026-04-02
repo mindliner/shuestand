@@ -7,10 +7,11 @@ use cdk::Amount;
 use cdk::wallet::{SendOptions, Wallet as CashuWallet};
 use reqwest::{Client, Url};
 use serde::Serialize;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::sleep;
 
 use crate::db::{Database, DepositState};
+use crate::operations::OperationMode;
 
 pub struct DepositWorker {
     db: Database,
@@ -18,6 +19,7 @@ pub struct DepositWorker {
     interval: Duration,
     max_attempts: u32,
     http: Client,
+    operation_mode: Arc<RwLock<OperationMode>>,
 }
 
 impl DepositWorker {
@@ -27,6 +29,7 @@ impl DepositWorker {
         interval: Duration,
         max_attempts: u32,
         http: Client,
+        operation_mode: Arc<RwLock<OperationMode>>,
     ) -> Self {
         Self {
             db,
@@ -34,16 +37,25 @@ impl DepositWorker {
             interval,
             max_attempts: max_attempts.max(1),
             http,
+            operation_mode,
         }
     }
 
     pub async fn run(mut self) {
         loop {
+            if self.should_pause().await {
+                sleep(self.interval).await;
+                continue;
+            }
             if let Err(err) = self.tick().await {
                 tracing::error!(target: "backend", error = %err, "deposit worker tick failed");
             }
             sleep(self.interval).await;
         }
+    }
+
+    async fn should_pause(&self) -> bool {
+        matches!(*self.operation_mode.read().await, OperationMode::Halt)
     }
 
     async fn tick(&mut self) -> anyhow::Result<()> {

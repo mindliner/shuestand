@@ -1,12 +1,14 @@
+use crate::operations::{OPERATION_MODE_KEY, OperationMode};
 use anyhow::Result as AnyResult;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{
-    Error, PgPool, Row,
+    Error, PgPool, Postgres, Row, Transaction,
     error::BoxDynError,
     postgres::{PgPoolOptions, PgRow},
 };
+use std::str::FromStr;
 
 const DEPOSIT_SELECT_FIELDS: &str = "id, amount_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, minted_token, minted_amount_sats, token_ready_at, mint_attempt_count, last_mint_attempt_at, mint_error, delivery_attempt_count, last_delivery_attempt_at, delivery_error, pickup_token, pickup_revealed_at, session_id";
 
@@ -20,6 +22,35 @@ impl Database {
         let pool = PgPoolOptions::new().max_connections(5).connect(url).await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
         Ok(Self { pool })
+    }
+
+    pub async fn load_operation_mode(&self) -> Result<OperationMode, Error> {
+        let raw = sqlx::query_scalar::<_, String>("SELECT value FROM app_settings WHERE key = $1")
+            .bind(OPERATION_MODE_KEY)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        if let Some(value) = raw {
+            Ok(OperationMode::from_str(value.trim()).unwrap_or(OperationMode::Normal))
+        } else {
+            Ok(OperationMode::Normal)
+        }
+    }
+
+    pub async fn persist_operation_mode(&self, mode: OperationMode) -> Result<(), Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO app_settings (key, value)
+            VALUES ($1, $2)
+            ON CONFLICT (key)
+            DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            "#,
+        )
+        .bind(OPERATION_MODE_KEY)
+        .bind(mode.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn insert_deposit(&self, deposit: &Deposit) -> Result<(), Error> {
@@ -663,10 +694,12 @@ impl Database {
 
     pub async fn record_pickup_success(&self, deposit_id: &str) -> Result<(), Error> {
         let now = Utc::now().to_rfc3339();
-        sqlx::query(
+        let result = sqlx::query(
             r#"UPDATE deposits
             SET state = $2,
                 pickup_revealed_at = $3,
+                minted_token = NULL,
+                pickup_token = CONCAT('claimed-', id),
                 updated_at = $3
             WHERE id = $1"#,
         )
@@ -675,7 +708,90 @@ impl Database {
         .bind(&now)
         .execute(&self.pool)
         .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+
         Ok(())
+    }
+
+    /// Atomically claims the minted ecash for a deposit exactly once.
+    ///
+    /// This provides a durable idempotency boundary against replay: once claimed,
+    /// the minted token is removed from `deposits`, a claim row is inserted, and
+    /// the pickup token is rotated so replays fail validation.
+    pub async fn claim_deposit_pickup(
+        &self,
+        deposit_id: &str,
+        pickup_token: &str,
+    ) -> Result<String, Error> {
+        let mut tx: Transaction<'_, Postgres> = self.pool.begin().await?;
+
+        // Lock the row so concurrent claim attempts serialize.
+        let row = sqlx::query(
+            r#"SELECT state, minted_token
+               FROM deposits
+              WHERE id = $1 AND pickup_token = $2
+              FOR UPDATE"#,
+        )
+        .bind(deposit_id)
+        .bind(pickup_token)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let state: String = row.try_get("state")?;
+        let minted_token: Option<String> = row.try_get("minted_token")?;
+
+        let state = state.trim();
+
+        // If it was already fulfilled, we never re-serve the token.
+        if state == DepositState::Fulfilled.as_str() {
+            tx.rollback().await?;
+            return Err(sqlx::Error::RowNotFound);
+        }
+
+        let minted = minted_token.ok_or_else(|| sqlx::Error::RowNotFound)?;
+        if state != DepositState::Ready.as_str() {
+            tx.rollback().await?;
+            return Err(sqlx::Error::RowNotFound);
+        }
+
+        // Insert the claim row (primary key on deposit_id makes this one-shot).
+        // If this conflicts due to a race, we treat it as already claimed.
+        let insert = sqlx::query(
+            r#"INSERT INTO deposit_claims (deposit_id, minted_token)
+               VALUES ($1, $2)
+               ON CONFLICT (deposit_id) DO NOTHING"#,
+        )
+        .bind(deposit_id)
+        .bind(&minted)
+        .execute(&mut *tx)
+        .await?;
+
+        if insert.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Err(sqlx::Error::RowNotFound);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"UPDATE deposits
+                SET state = $2,
+                    pickup_revealed_at = $3,
+                    minted_token = NULL,
+                    pickup_token = CONCAT('claimed-', id),
+                    updated_at = $3
+              WHERE id = $1"#,
+        )
+        .bind(deposit_id)
+        .bind(DepositState::Fulfilled.as_str())
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(minted)
     }
 
     pub async fn ledger_deposit_liabilities(&self) -> Result<Vec<StateLiabilityRow>, Error> {
@@ -853,7 +969,7 @@ pub struct Deposit {
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing)]
     pub minted_token: Option<String>,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(skip_serializing)]
     pub pickup_token: String,
@@ -942,7 +1058,7 @@ pub struct Withdrawal {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub token_consumed: bool,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub swap_fee_sats: Option<u64>,

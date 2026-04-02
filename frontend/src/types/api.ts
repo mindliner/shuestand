@@ -25,6 +25,7 @@ export interface Deposit {
   created_at?: string | null
   updated_at?: string | null
   delivery_error?: string | null
+  session_id?: string | null
 }
 
 export type WithdrawalState =
@@ -54,6 +55,7 @@ export interface Withdrawal {
   source_mint_url?: string | null
   is_foreign_mint?: boolean | null
   token_consumed: boolean
+  session_id?: string | null
   swap_fee_sats?: number | null
   payment_request?: WithdrawalPaymentRequest | null
   last_attempt_at?: string | null
@@ -193,6 +195,21 @@ export interface FloatStatusResponse {
   cashu: WalletFloatStatus
   total_balance_sats?: number
   drift_sats?: number
+}
+
+export interface PublicConfigResponse {
+  withdrawal_min_sats: number
+  deposit_target_confirmations: number
+  float_target_sats: number
+  float_min_ratio: number
+  float_max_ratio: number
+  single_request_cap_ratio: number
+}
+
+export type OperationMode = 'normal' | 'drain' | 'halt'
+
+export interface OperationModeResponse {
+  mode: OperationMode
 }
 
 export interface LedgerSnapshotResponse {

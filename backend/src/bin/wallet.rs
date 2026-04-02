@@ -275,7 +275,12 @@ async fn request_invoice(wallet: &WalletHandle, amount: u64, method: KnownMethod
     let quote_id = {
         let guard = wallet.lock().await;
         let quote = guard
-            .mint_quote(method, Some(Amount::from(amount)), None, None)
+            .mint_quote(
+                cdk::nuts::PaymentMethod::Known(method),
+                Some(Amount::from(amount)),
+                None,
+                None,
+            )
             .await?;
         println!(
             "Pay this invoice to credit {amount} sats:\n{}",

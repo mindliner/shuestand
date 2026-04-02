@@ -4,11 +4,13 @@ use std::time::{Duration, Instant};
 use anyhow::anyhow;
 use async_trait::async_trait;
 use cdk::wallet::ReceiveOptions;
+use tokio::sync::RwLock;
 use tokio::time::sleep;
 
-use crate::cashu::{token_mint_url, token_total_amount};
+use crate::cashu::{token_fingerprint, token_mint_url, token_total_amount};
 use crate::db::{Database, Withdrawal, WithdrawalState};
 use crate::onchain::OnchainWallet;
+use crate::operations::OperationMode;
 use crate::telemetry::AppMetrics;
 use crate::wallet::{MintSwapService, MultiMintWalletManager};
 
@@ -18,6 +20,7 @@ pub struct WithdrawalWorker {
     interval: Duration,
     max_attempts: u32,
     metrics: Arc<AppMetrics>,
+    operation_mode: Arc<RwLock<OperationMode>>,
 }
 
 impl WithdrawalWorker {
@@ -27,6 +30,7 @@ impl WithdrawalWorker {
         interval: Duration,
         max_attempts: u32,
         metrics: Arc<AppMetrics>,
+        operation_mode: Arc<RwLock<OperationMode>>,
     ) -> Self {
         Self {
             db,
@@ -34,16 +38,25 @@ impl WithdrawalWorker {
             interval,
             max_attempts: max_attempts.max(1),
             metrics,
+            operation_mode,
         }
     }
 
     pub async fn run(mut self) {
         loop {
+            if self.should_pause().await {
+                sleep(self.interval).await;
+                continue;
+            }
             if let Err(err) = self.tick().await {
                 tracing::error!(target: "backend", error = %err, "withdrawal worker tick failed");
             }
             sleep(self.interval).await;
         }
+    }
+
+    async fn should_pause(&self) -> bool {
+        matches!(*self.operation_mode.read().await, OperationMode::Halt)
     }
 
     async fn tick(&mut self) -> anyhow::Result<()> {
@@ -160,15 +173,31 @@ impl CashuRedeemer for CdkCashuRedeemer {
 
         if mint_url == self.wallets.canonical_mint() {
             let wallet = self.wallets.wallet_for_mint(&mint_url).await?;
-            let amount = wallet
+            match wallet
                 .lock()
                 .await
                 .receive(encoded_token, ReceiveOptions::default())
-                .await?;
-            return Ok(CashuRedeemResult {
-                amount_sats: amount.to_u64(),
-                swap_fee_sats: None,
-            });
+                .await
+            {
+                Ok(amount) => {
+                    return Ok(CashuRedeemResult {
+                        amount_sats: amount.to_u64(),
+                        swap_fee_sats: None,
+                    });
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "backend",
+                        mint_url = %mint_url,
+                        token_chars = encoded_token.len(),
+                        token_amount_sats = token_amount,
+                        token_fingerprint = %token_fingerprint(encoded_token),
+                        error = %err,
+                        "canonical mint rejected token during redeem"
+                    );
+                    return Err(err.into());
+                }
+            }
         }
 
         tracing::info!(
@@ -301,3 +330,4 @@ impl WithdrawalExecutor for MockWithdrawalExecutor {
         })
     }
 }
+

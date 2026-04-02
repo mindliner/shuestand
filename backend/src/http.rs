@@ -19,9 +19,10 @@ use std::{borrow::ToOwned, fs, sync::Arc, time::Instant};
 use uuid::Uuid;
 
 use crate::AppState;
-use backend::cashu::{TokenMintError, token_mint_url, token_total_amount};
+use backend::cashu::{TokenMintError, token_fingerprint, token_mint_url, token_total_amount};
 use backend::db::{Deposit, DepositState, Session, StateLiabilityRow, Withdrawal, WithdrawalState};
 use backend::onchain::{OnchainBalance, OnchainWallet};
+use backend::operations::OperationMode;
 use backend::wallet::WalletHandle;
 use cdk::Amount;
 use cdk::amount::SplitTarget;
@@ -60,6 +61,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthcheck))
         .route("/metrics", get(export_metrics))
+        .route("/api/v1/config", get(get_public_config))
         .route("/api/v1/sessions", post(start_session))
         .route("/api/v1/sessions/resume", post(resume_session))
         .route("/api/v1/deposits", post(create_deposit))
@@ -98,6 +100,10 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/operator/withdrawals/:id/actions",
             post(operate_withdrawal),
         )
+        .route(
+            "/api/v1/operator/mode",
+            get(get_operation_mode).post(update_operation_mode),
+        )
         .route("/api/v1/float/status", get(get_float_status))
         .with_state(state)
 }
@@ -111,6 +117,29 @@ struct ApiResponse<T> {
 struct ApiError {
     code: &'static str,
     message: String,
+}
+
+#[derive(Serialize)]
+struct PublicConfigResponse {
+    withdrawal_min_sats: u64,
+    deposit_target_confirmations: u8,
+    float_target_sats: u64,
+    float_min_ratio: f32,
+    float_max_ratio: f32,
+    single_request_cap_ratio: f64,
+}
+
+async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicConfigResponse> {
+    let payload = PublicConfigResponse {
+        withdrawal_min_sats: state.withdrawal_min_sats,
+        deposit_target_confirmations: state.deposit_target_confirmations,
+        float_target_sats: state.float_target_sats,
+        float_min_ratio: state.float_min_ratio,
+        float_max_ratio: state.float_max_ratio,
+        single_request_cap_ratio: state.single_request_cap_ratio,
+    };
+
+    Ok(Json(ApiResponse { data: payload }))
 }
 
 #[derive(Deserialize, Debug)]
@@ -184,6 +213,16 @@ struct WithdrawalView {
     is_foreign_mint: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     payment_request: Option<WithdrawalPaymentRequestView>,
+}
+
+#[derive(Serialize)]
+struct OperationModeResponse {
+    mode: OperationMode,
+}
+
+#[derive(Deserialize)]
+struct OperationModeUpdateRequest {
+    mode: OperationMode,
 }
 
 impl WithdrawalView {
@@ -625,6 +664,11 @@ async fn create_deposit(
     const MIN_DEPOSIT_SATS: u64 = super::MIN_DEPOSIT_SATS;
     const MAX_DEPOSIT_SATS: u64 = super::MAX_DEPOSIT_SATS;
 
+    match state.current_operation_mode().await {
+        OperationMode::Normal => {}
+        mode => return Err(mode_blocked(mode, "deposits")),
+    }
+
     if req.amount_sats < MIN_DEPOSIT_SATS || req.amount_sats > MAX_DEPOSIT_SATS {
         return Err(invalid_request("amount_sats is outside the allowed range"));
     }
@@ -739,34 +783,23 @@ async fn pickup_deposit(
         return Err(invalid_request("pickup_token_required"));
     }
 
-    let deposit = match state.db.fetch_deposit(&id).await {
-        Ok(dep) => dep,
-        Err(sqlx::Error::RowNotFound) => return Err(not_found("deposit_not_found")),
+    // Claim is one-shot. If it was already claimed (or token isn't ready), we never re-serve it.
+    let minted = match state.db.claim_deposit_pickup(&id, pickup_token).await {
+        Ok(token) => token,
+        Err(sqlx::Error::RowNotFound) => {
+            // Intentionally ambiguous to avoid leaking whether the deposit exists.
+            return Err(conflict("deposit_not_ready_for_pickup"));
+        }
         Err(err) => return Err(server_error(err)),
     };
 
-    if deposit.pickup_token != pickup_token {
-        return Err(invalid_request("pickup_token_invalid"));
-    }
-
-    let minted = deposit
-        .minted_token
-        .clone()
-        .ok_or_else(|| invalid_request("token_not_ready"))?;
-
-    match deposit.state {
-        DepositState::Ready => {
-            state
-                .db
-                .record_pickup_success(&deposit.id)
-                .await
-                .map_err(server_error)?;
-        }
-        DepositState::Fulfilled => {}
-        _ => {
-            return Err(conflict("deposit_not_ready_for_pickup"));
-        }
-    }
+    tracing::info!(
+        target: "backend",
+        deposit_id = %id,
+        token_chars = minted.len(),
+        token_fingerprint = %token_fingerprint(&minted),
+        "deposit pickup served token"
+    );
 
     Ok(Json(ApiResponse {
         data: DepositPickupResponse { token: minted },
@@ -778,6 +811,11 @@ async fn request_withdrawal(
     headers: HeaderMap,
     Json(req): Json<WithdrawalRequest>,
 ) -> ApiResult<WithdrawalView> {
+    match state.current_operation_mode().await {
+        OperationMode::Normal => {}
+        mode => return Err(mode_blocked(mode, "withdrawals")),
+    }
+
     if req.amount_sats == 0 {
         return Err(invalid_request("amount_sats must be greater than zero"));
     }
@@ -1286,7 +1324,12 @@ async fn create_cashu_invoice(
     let quote = {
         let guard = wallet.lock().await;
         guard
-            .mint_quote(method, Some(Amount::from(req.amount_sats)), None, None)
+            .mint_quote(
+                cdk::nuts::PaymentMethod::Known(method),
+                Some(Amount::from(req.amount_sats)),
+                None,
+                None,
+            )
             .await
             .map_err(server_error)?
     };
@@ -1862,6 +1905,33 @@ async fn get_float_status(
     }))
 }
 
+async fn get_operation_mode(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<OperationModeResponse> {
+    require_operator_token(&state, &headers)?;
+    let mode = state.current_operation_mode().await;
+    Ok(Json(ApiResponse {
+        data: OperationModeResponse { mode },
+    }))
+}
+
+async fn update_operation_mode(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<OperationModeUpdateRequest>,
+) -> ApiResult<OperationModeResponse> {
+    require_operator_token(&state, &headers)?;
+    state
+        .set_operation_mode(req.mode)
+        .await
+        .map_err(server_error)?;
+    tracing::info!(target: "backend", mode = %req.mode, "operator mode updated");
+    Ok(Json(ApiResponse {
+        data: OperationModeResponse { mode: req.mode },
+    }))
+}
+
 fn encode_payment_request(request: &Nut18PaymentRequest) -> Result<String, serde_cbor::Error> {
     let cbor = serde_cbor::to_vec(request)?;
     Ok(format!("creqA{}", URL_SAFE_NO_PAD.encode(cbor)))
@@ -2192,6 +2262,19 @@ fn unavailable(message: &str) -> (StatusCode, Json<ApiError>) {
             message: message.to_string(),
         }),
     )
+}
+
+fn mode_blocked(mode: OperationMode, resource: &str) -> (StatusCode, Json<ApiError>) {
+    let message = match mode {
+        OperationMode::Drain => {
+            format!("Shuestand is draining; new {resource} are temporarily disabled")
+        }
+        OperationMode::Halt => {
+            format!("Shuestand is paused; new {resource} are temporarily disabled")
+        }
+        OperationMode::Normal => unreachable!("mode_blocked should not be called in normal mode"),
+    };
+    unavailable(&message)
 }
 
 fn unauthorized() -> (StatusCode, Json<ApiError>) {

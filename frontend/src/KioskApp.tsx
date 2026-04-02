@@ -9,6 +9,7 @@ const STORAGE_KEYS = {
   legacyDeposit: 'shuestand.latestDepositId',
   legacyWithdrawal: 'shuestand.latestWithdrawalId',
   deliveryAddress: 'shuestand.latestDeliveryAddress',
+  archives: 'shuestand.archives',
 }
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import './App.css'
@@ -18,11 +19,12 @@ import { DELIVERY_TARGETS } from './config/deliveryTargets'
 import { detectTokenMint } from './lib/cashu'
 import { isValidBitcoinAddress } from './lib/bitcoin'
 import type { Theme } from './lib/theme'
-import type { CreateWithdrawalRequest, SessionStartResponse } from './types/api'
+import type { CreateWithdrawalRequest, SessionStartResponse, Deposit, Withdrawal } from './types/api'
 import {
   ApiClientError,
   createDeposit,
   createWithdrawal,
+  getPublicConfig,
   getDeposit,
   getWithdrawal,
   pickupDeposit,
@@ -51,9 +53,19 @@ type SessionInfo = {
   expiresAt: string
 }
 
+type ArchivedEntry = {
+  id: string
+  amount: number
+  kind: 'deposit' | 'withdrawal'
+  archivedAt: string
+}
+
 const DEFAULT_DEPOSIT_AMOUNT = config.depositMinSats.toString()
 const DEFAULT_WITHDRAWAL_AMOUNT = config.withdrawalMinSats.toString()
 const STATUS_REFRESH_MS = 5000
+const MAX_ARCHIVED_ENTRIES = 20
+
+const formatSats = (value: number) => value.toLocaleString('en-US')
 
 const normalizeError = (err: unknown): Error | null => {
   if (!err) return null
@@ -78,11 +90,15 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   const [selectedDepositId, setSelectedDepositId] = useState<string | null>(null)
   const [withdrawals, setWithdrawals] = useState<StoredWithdrawal[]>([])
   const [selectedWithdrawalId, setSelectedWithdrawalId] = useState<string | null>(null)
+  const [archivedEntries, setArchivedEntries] = useState<ArchivedEntry[]>([])
   const [session, setSession] = useState<SessionInfo | null>(null)
   const [sessionBusy, setSessionBusy] = useState(false)
   const [resumeCode, setResumeCode] = useState('')
   const [resumeFlowHint, setResumeFlowHint] = useState(false)
   const [sessionHydrationTick, setSessionHydrationTick] = useState(0)
+  const [limits, setLimits] = useState(() => ({
+    withdrawalMinSats: config.withdrawalMinSats,
+  }))
   const navigate = useNavigate()
 
   const scopedKey = (base: string, sessionId: string) => `${base}.${sessionId}`
@@ -101,15 +117,31 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     window.localStorage.setItem(scopedKey(STORAGE_KEYS.withdrawals, sessionId), JSON.stringify(entries))
   }
 
+  const persistArchived = (entries: ArchivedEntry[], sessionId?: string) => {
+    if (typeof window === 'undefined' || !sessionId) {
+      return
+    }
+    window.localStorage.setItem(scopedKey(STORAGE_KEYS.archives, sessionId), JSON.stringify(entries))
+  }
+
   const storeSessionInfo = (info: SessionInfo | null) => {
     if (typeof window === 'undefined') {
       return
     }
     if (info) {
-      window.sessionStorage.setItem(STORAGE_KEYS.session, JSON.stringify(info))
+      window.localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(info))
     } else {
-      window.sessionStorage.removeItem(STORAGE_KEYS.session)
+      window.localStorage.removeItem(STORAGE_KEYS.session)
     }
+  }
+
+  const clearSessionCaches = (sessionId?: string) => {
+    if (typeof window === 'undefined' || !sessionId) {
+      return
+    }
+    window.localStorage.removeItem(scopedKey(STORAGE_KEYS.deposits, sessionId))
+    window.localStorage.removeItem(scopedKey(STORAGE_KEYS.withdrawals, sessionId))
+    window.localStorage.removeItem(scopedKey(STORAGE_KEYS.archives, sessionId))
   }
 
   const resetTrackingState = () => {
@@ -117,6 +149,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     setSelectedDepositId(null)
     setWithdrawals([])
     setSelectedWithdrawalId(null)
+    setArchivedEntries([])
   }
 
   const applySessionPayload = (payload: SessionStartResponse, opts?: { resumed?: boolean }) => {
@@ -133,6 +166,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   }
 
   const dropSession = (notice?: string) => {
+    if (session?.id) {
+      clearSessionCaches(session.id)
+    }
     storeSessionInfo(null)
     setSession(null)
     setResumeFlowHint(false)
@@ -158,10 +194,47 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   const sessionToken = session?.token ?? null
 
   useEffect(() => {
+    let cancelled = false
+    const loadRuntimeConfig = async () => {
+      try {
+        const runtime = await getPublicConfig()
+        if (cancelled || !runtime) {
+          return
+        }
+        const min = Number(runtime.withdrawal_min_sats)
+        if (Number.isFinite(min) && min > 0) {
+          setLimits((current) =>
+            current.withdrawalMinSats === min
+              ? current
+              : { ...current, withdrawalMinSats: min }
+          )
+        }
+      } catch (err) {
+        console.warn('Failed to load runtime config', err)
+      }
+    }
+
+    loadRuntimeConfig()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    setWithdrawalAmount((current) => {
+      const numeric = Number(current)
+      if (!Number.isFinite(numeric) || numeric >= limits.withdrawalMinSats) {
+        return current
+      }
+      return limits.withdrawalMinSats.toString()
+    })
+  }, [limits.withdrawalMinSats])
+
+  useEffect(() => {
     if (typeof window === 'undefined') {
       return
     }
-    const rawSession = window.sessionStorage.getItem(STORAGE_KEYS.session)
+    const rawSession = window.localStorage.getItem(STORAGE_KEYS.session)
     if (rawSession) {
       try {
         const parsed = JSON.parse(rawSession)
@@ -312,8 +385,32 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
       })
     }
 
+    const hydrateArchived = () => {
+      if (!session?.id) {
+        return
+      }
+      const key = scopedKey(STORAGE_KEYS.archives, session.id)
+      const raw = window.localStorage.getItem(key)
+      if (raw) {
+        try {
+          const json = JSON.parse(raw)
+          if (Array.isArray(json)) {
+            const parsed = json.filter((entry): entry is ArchivedEntry =>
+              entry && typeof entry.id === 'string' && typeof entry.amount === 'number' && typeof entry.kind === 'string'
+            )
+            setArchivedEntries(parsed)
+            return
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      setArchivedEntries([])
+    }
+
     hydrateDeposits()
     hydrateWithdrawals()
+    hydrateArchived()
     setSessionHydrationTick((prev) => prev + 1)
 
   }, [session])
@@ -358,26 +455,60 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     setSelectedWithdrawalId(id)
   }
 
-  const clearDepositId = () => {
-    if (!selectedDepositId) {
+  const addArchivedEntry = (entry: ArchivedEntry) => {
+    if (!session?.id) {
       return
     }
-    pickupMutation.reset()
-    setDeposits((current) => {
-      const next = current.filter((entry) => entry.id !== selectedDepositId)
-      persistDeposits(next, session?.id)
-      setSelectedDepositId(next[0]?.id ?? null)
+    setArchivedEntries((current) => {
+      const next = [entry, ...current].slice(0, MAX_ARCHIVED_ENTRIES)
+      persistArchived(next, session.id)
       return next
     })
   }
 
-  const clearWithdrawalId = () => {
-    if (!selectedWithdrawalId) {
+  const archiveDeposit = (deposit: Deposit) => {
+    if (!session?.id) {
       return
     }
+    if (selectedDepositId === deposit.id) {
+      pickupMutation.reset()
+    }
+    addArchivedEntry({
+      id: deposit.id,
+      amount: deposit.amount_sats,
+      kind: 'deposit',
+      archivedAt: new Date().toISOString(),
+    })
+    setDeposits((current) => {
+      const next = current.filter((entry) => entry.id !== deposit.id)
+      persistDeposits(next, session.id)
+      setSelectedDepositId((currentSelected) => {
+        if (currentSelected === deposit.id) {
+          return next[0]?.id ?? null
+        }
+        return currentSelected
+      })
+      return next
+    })
+  }
+
+  const archiveWithdrawal = (withdrawal?: Withdrawal) => {
+    if (!selectedWithdrawalId || !session?.id) {
+      return
+    }
+    if (withdrawal) {
+      addArchivedEntry({
+        id: withdrawal.id,
+        amount:
+          withdrawal.token_value_sats ?? withdrawal.requested_amount_sats ?? 0,
+        kind: 'withdrawal',
+        archivedAt: new Date().toISOString(),
+      })
+    }
+    const targetId = withdrawal?.id ?? selectedWithdrawalId
     setWithdrawals((current) => {
-      const next = current.filter((entry) => entry.id !== selectedWithdrawalId)
-      persistWithdrawals(next, session?.id)
+      const next = current.filter((entry) => entry.id !== targetId)
+      persistWithdrawals(next, session.id)
       setSelectedWithdrawalId(next[0]?.id ?? null)
       return next
     })
@@ -445,15 +576,16 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     mutationFn: ({ id, pickupToken }: { id: string; pickupToken: string }) =>
       pickupDeposit(id, pickupToken, sessionToken ?? undefined),
     onSuccess: async (resp, variables) => {
+      const warning = 'Paste it immediately — this app will not display the token again.'
       if (resp?.token) {
         const copied = await copyTextWithFallback(resp.token)
         if (copied) {
-          setMessage('Token revealed and copied to clipboard')
+          setMessage(`Token revealed and copied to clipboard. ${warning}`)
         } else {
-          setMessage('Token revealed (copy failed, use the copy button)')
+          setMessage(`Token revealed but automatic copy failed. Token: ${resp.token} ${warning}`)
         }
       } else {
-        setMessage('Token revealed')
+        setMessage(`Token revealed. ${warning}`)
       }
       if (variables?.id) {
         queryClient.invalidateQueries({ queryKey: ['deposit', variables.id] })
@@ -609,13 +741,13 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           const decodedAmount = tokenMintInfo && !('error' in tokenMintInfo) ? tokenMintInfo.amount : null
           if (decodedAmount !== null) {
             resolvedAmount = decodedAmount
-            if (resolvedAmount < config.withdrawalMinSats) {
+            if (resolvedAmount < withdrawalMinimum) {
               throw new Error(
-                `Token value must be at least ${config.withdrawalMinSats.toLocaleString()} sats`
+                `Token value must be at least ${withdrawalMinimum.toLocaleString()} sats`
               )
             }
           } else {
-            resolvedAmount = config.withdrawalMinSats
+            resolvedAmount = withdrawalMinimum
           }
 
           payload.amount_sats = resolvedAmount
@@ -624,11 +756,11 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           if (resolvedAmount <= 0 || Number.isNaN(resolvedAmount)) {
             throw new Error('Withdrawal amount must be greater than zero')
           }
-          if (resolvedAmount < config.withdrawalMinSats) {
-            throw new Error(
-              `Withdrawal amount must be at least ${config.withdrawalMinSats.toLocaleString()} sats`
-            )
-          }
+        if (resolvedAmount < withdrawalMinimum) {
+          throw new Error(
+            `Withdrawal amount must be at least ${withdrawalMinimum.toLocaleString()} sats`
+          )
+        }
           payload.amount_sats = resolvedAmount
           payload.create_payment_request = true
         }
@@ -653,7 +785,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     }
   }
 
-  const withdrawalMinimum = config.withdrawalMinSats
+  const withdrawalMinimum = limits.withdrawalMinSats
   const decodedTokenAmount =
     tokenMintInfo && !('error' in tokenMintInfo) ? tokenMintInfo.amount : null
   const tokenBelowMinimum = Boolean(
@@ -684,6 +816,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           Claim code: <code>{session.claimCode}</code>
         </p>
         <p className="helper">Expires {sessionExpiryText}</p>
+        <p className="helper subtle">
+          Pickup tokens stay cached on this browser until you end the session, then they are wiped automatically.
+        </p>
       </div>
       <div className="session-actions">
         <button type="button" onClick={handleCopyClaimCode}>
@@ -868,13 +1003,13 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                       Amount (sats)
                       <input
                         type="number"
-                        min={config.withdrawalMinSats}
+                        min={withdrawalMinimum}
                         value={withdrawalAmount}
                         onChange={(e) => setWithdrawalAmount(e.target.value)}
                         required={withdrawalMethod === 'payment_request'}
                       />
                       <span className="helper">
-                        Minimum {config.withdrawalMinSats.toLocaleString()} sats
+                        Minimum {withdrawalMinimum.toLocaleString()} sats
                       </span>
                     </label>
                   )}
@@ -965,7 +1100,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                     onPickup={handleDepositPickup}
                     pickupPending={pickupMutation.isPending}
                     pickupError={pickupError}
-                    onClear={deposits.length ? clearDepositId : undefined}
+                    onClear={deposits.length ? archiveDeposit : undefined}
                   />
                 </>
               ) : (
@@ -991,16 +1126,34 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                     isLoading={withdrawalLoading}
                     hasSubmission={Boolean(selectedWithdrawalId)}
                   />
-                  {selectedWithdrawalId && (
+                  {selectedWithdrawalId && latestWithdrawal && (
                     <button
                       type="button"
                       className="link-button"
-                      onClick={clearWithdrawalId}
+                      onClick={() => archiveWithdrawal(latestWithdrawal)}
                     >
                       Archive this withdrawal
                     </button>
                   )}
                 </>
+              )}
+
+              {archivedEntries.length > 0 && (
+                <div className="status-block nested">
+                  <h4>Archived transactions</h4>
+                  <ul className="archived-list">
+                    {archivedEntries.map((entry) => (
+                      <li key={`${entry.kind}-${entry.id}-${entry.archivedAt}`}>
+                        <span className="status-meta code">{entry.id}</span>
+                        <span className="status-meta">
+                          {entry.kind === 'deposit' ? 'Deposit' : 'Withdrawal'} ·{' '}
+                          {formatSats(entry.amount)} sats ·{' '}
+                          {new Date(entry.archivedAt).toLocaleTimeString()}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               )}
             </aside>
           </>

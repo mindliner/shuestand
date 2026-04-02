@@ -5,6 +5,7 @@ use backend::address::{AddressFactory, AddressPool};
 use backend::config::AppConfig;
 use backend::db::{Database, DepositState, WithdrawalState};
 use backend::onchain::{BlockchainClient, OnchainWallet, TxStatus};
+use backend::operations::OperationMode;
 use backend::telemetry::AppMetrics;
 use backend::wallet::{
     MintSwapService, MultiMintWalletManager, WalletConfig, WalletHandle, open_wallet,
@@ -119,12 +120,32 @@ struct AppState {
     cashu_wallet: Option<WalletHandle>,
     cashu_mint_url: Option<String>,
     float_status: Arc<RwLock<FloatStatus>>,
+    operation_mode: Arc<RwLock<OperationMode>>,
     float_target_sats: u64,
     float_min_ratio: f32,
     float_max_ratio: f32,
     withdrawal_min_sats: u64,
     single_request_cap_ratio: f64,
     session_ttl: ChronoDuration,
+}
+
+impl AppState {
+    pub(crate) async fn current_operation_mode(&self) -> OperationMode {
+        *self.operation_mode.read().await
+    }
+
+    pub(crate) async fn set_operation_mode(&self, next: OperationMode) -> Result<(), Error> {
+        {
+            let guard = self.operation_mode.read().await;
+            if *guard == next {
+                return Ok(());
+            }
+        }
+        self.db.persist_operation_mode(next).await?;
+        let mut guard = self.operation_mode.write().await;
+        *guard = next;
+        Ok(())
+    }
 }
 
 #[tokio::main]
@@ -143,6 +164,19 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let db = Database::connect(&database_url).await?;
     tracing::info!(target: "backend", "connected to database");
+
+    let initial_operation_mode = match db.load_operation_mode().await {
+        Ok(mode) => mode,
+        Err(err) => {
+            tracing::warn!(
+                target: "backend",
+                error = %err,
+                "failed to load operation mode; defaulting to normal"
+            );
+            OperationMode::Normal
+        }
+    };
+    let operation_mode = Arc::new(RwLock::new(initial_operation_mode));
 
     let metrics = Arc::new(AppMetrics::new());
     let float_status = Arc::new(RwLock::new(FloatStatus::default()));
@@ -191,8 +225,13 @@ async fn main() -> Result<(), anyhow::Error> {
     if let Some(chain) = chain_source.clone() {
         let watcher_db = db.clone();
         let poll_every = config.confirmation_poll_interval;
+        let mode_handle = operation_mode.clone();
         tokio::spawn(async move {
             loop {
+                if matches!(*mode_handle.read().await, OperationMode::Halt) {
+                    sleep(poll_every).await;
+                    continue;
+                }
                 if let Err(err) = process_confirmations(&watcher_db, chain.as_ref()).await {
                     tracing::error!(target: "backend", error = %err, "confirmation pass failed");
                 }
@@ -349,6 +388,9 @@ async fn main() -> Result<(), anyhow::Error> {
         let max_ratio = config.float_max_ratio;
         let interval = config.float_guard_interval;
         let drift_alert_ratio = config.float_drift_alert_ratio;
+        let mode_handle = operation_mode.clone();
+        let db_clone = db.clone();
+        let auto_drain_threshold = config.withdrawal_min_sats.saturating_mul(2);
 
         tokio::spawn(async move {
             monitor_float_levels(
@@ -361,6 +403,9 @@ async fn main() -> Result<(), anyhow::Error> {
                 max_ratio,
                 drift_alert_ratio,
                 interval,
+                auto_drain_threshold,
+                mode_handle,
+                db_clone,
             )
             .await;
         });
@@ -422,6 +467,7 @@ async fn main() -> Result<(), anyhow::Error> {
             config.withdrawal_worker_interval,
             config.withdrawal_worker_max_attempts,
             metrics.clone(),
+            operation_mode.clone(),
         );
         tokio::spawn(async move {
             worker.run().await;
@@ -445,6 +491,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 config.deposit_worker_interval,
                 config.deposit_worker_max_attempts,
                 Client::new(),
+                operation_mode.clone(),
             );
             tokio::spawn(async move {
                 worker.run().await;
@@ -463,8 +510,13 @@ async fn main() -> Result<(), anyhow::Error> {
         let watcher_db = db.clone();
         let poll_every = config.confirmation_poll_interval;
         let target_conf = config.withdrawal_target_confirmations;
+        let mode_handle = operation_mode.clone();
         tokio::spawn(async move {
             loop {
+                if matches!(*mode_handle.read().await, OperationMode::Halt) {
+                    sleep(poll_every).await;
+                    continue;
+                }
                 if let Err(err) =
                     process_withdrawal_settlements(&watcher_db, wallet.clone(), target_conf).await
                 {
@@ -490,6 +542,7 @@ async fn main() -> Result<(), anyhow::Error> {
         cashu_wallet: cashu_wallet.clone(),
         cashu_mint_url: normalized_cashu_mint.clone(),
         float_status: float_status.clone(),
+        operation_mode: operation_mode.clone(),
         float_target_sats: config.float_target_sats,
         float_min_ratio: config.float_min_ratio,
         float_max_ratio: config.float_max_ratio,
@@ -522,6 +575,9 @@ async fn monitor_float_levels(
     max_ratio: f32,
     drift_alert_ratio: f32,
     interval: Duration,
+    auto_drain_threshold: u64,
+    operation_mode: Arc<RwLock<OperationMode>>,
+    db: Database,
 ) {
     if target_sats == 0 {
         tracing::warn!(target: "backend", "FLOAT_TARGET_SATS is zero; float guard disabled");
@@ -589,6 +645,36 @@ async fn monitor_float_levels(
                     "total float drift back within guard rails"
                 );
                 drift_alert_active = false;
+            }
+        }
+
+        if auto_drain_threshold > 0 && total_balance <= auto_drain_threshold {
+            let should_trigger = {
+                let guard = operation_mode.read().await;
+                *guard == OperationMode::Normal
+            };
+            if should_trigger {
+                match db.persist_operation_mode(OperationMode::Drain).await {
+                    Ok(_) => {
+                        let mut guard = operation_mode.write().await;
+                        if *guard == OperationMode::Normal {
+                            *guard = OperationMode::Drain;
+                            tracing::warn!(
+                                target: "backend",
+                                total_balance_sats = total_balance,
+                                threshold_sats = auto_drain_threshold,
+                                "total float hit the auto-drain threshold; switching to drain mode"
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            target: "backend",
+                            error = %err,
+                            "failed to persist auto-drain mode"
+                        );
+                    }
+                }
             }
         }
 

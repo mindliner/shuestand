@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use cdk::nuts::Token;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -27,4 +28,11 @@ pub fn token_total_amount(token_raw: &str) -> Result<u64, TokenMintError> {
         .map_err(|_| TokenMintError::MultiMint)?
         .to_u64();
     Ok(amount)
+}
+
+pub fn token_fingerprint(token_raw: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token_raw.as_bytes());
+    let digest = hasher.finalize();
+    hex::encode(&digest[..8])
 }

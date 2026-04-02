@@ -24,6 +24,9 @@ import type {
   OperatorWithdrawalActionRequest,
   OperatorWithdrawalListParams,
   OperatorDepositActionRequest,
+  PublicConfigResponse,
+  OperationModeResponse,
+  OperationMode,
 } from '../types/api'
 
 const JSON_HEADERS = {
@@ -254,6 +257,29 @@ export function getLedgerSnapshot(token: string): Promise<LedgerSnapshotResponse
 export function getFloatStatus(token: string): Promise<FloatStatusResponse> {
   return request<FloatStatusResponse>('/api/v1/float/status', {
     headers: jsonHeaders(token),
+  })
+}
+
+export function getOperationMode(token: string): Promise<OperationModeResponse> {
+  return request<OperationModeResponse>('/api/v1/operator/mode', {
+    headers: jsonHeaders(token),
+  })
+}
+
+export function setOperationMode(
+  token: string,
+  mode: OperationMode,
+): Promise<OperationModeResponse> {
+  return request<OperationModeResponse>('/api/v1/operator/mode', {
+    method: 'POST',
+    headers: jsonHeaders(token),
+    body: JSON.stringify({ mode }),
+  })
+}
+
+export function getPublicConfig(): Promise<PublicConfigResponse> {
+  return request<PublicConfigResponse>('/api/v1/config', {
+    headers: JSON_HEADERS,
   })
 }
 

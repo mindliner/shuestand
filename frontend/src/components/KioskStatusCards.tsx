@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
+import { ApiClientError } from '../lib/api'
 import { copyTextWithFallback } from '../lib/clipboard'
 import type {
   Deposit,
@@ -7,6 +8,8 @@ import type {
   Withdrawal,
   WithdrawalState,
 } from '../types/api'
+
+const AVERAGE_BLOCK_MINUTES = 10
 
 interface DepositStatusCardProps {
   deposit?: Deposit
@@ -17,7 +20,7 @@ interface DepositStatusCardProps {
   onPickup?: () => void
   pickupPending?: boolean
   pickupError: Error | null
-  onClear?: () => void
+  onClear?: (deposit: Deposit) => void
 }
 
 interface WithdrawalStatusCardProps {
@@ -38,6 +41,29 @@ export function DepositStatusCard({
   pickupError,
   onClear,
 }: DepositStatusCardProps) {
+  const previousDepositId = useRef<string | null>(null)
+  const previousDepositState = useRef<DepositState | null>(null)
+
+  useEffect(() => {
+    if (!deposit) {
+      previousDepositId.current = null
+      previousDepositState.current = null
+      return
+    }
+
+    const isSameDeposit = previousDepositId.current === deposit.id
+    const transitionedToReady =
+      deposit.state === 'ready' &&
+      (!isSameDeposit || previousDepositState.current !== 'ready')
+
+    if (transitionedToReady) {
+      notifyDepositReady()
+    }
+
+    previousDepositId.current = deposit.id
+    previousDepositState.current = deposit.state
+  }, [deposit])
+
   if (!hasSubmission) {
     return (
       <div className="status-block">
@@ -67,6 +93,11 @@ export function DepositStatusCard({
 
   const bip21 = buildBip21Uri(deposit.address, deposit.amount_sats)
   const pickupCode = pickupToken ? pickupToken.slice(-6).toUpperCase() : null
+  const awaitingConfirmations =
+    deposit.state === 'pending' || deposit.state === 'confirming'
+  const confirmationEtaText = awaitingConfirmations
+    ? getConfirmationEtaText(deposit) ?? 'waiting for final block'
+    : null
 
   return (
     <div className="status-block">
@@ -74,6 +105,8 @@ export function DepositStatusCard({
       {pickupCode && (
         <p className="status-meta">Pickup code: <strong>{pickupCode}</strong></p>
       )}
+      <p className="status-meta code">{deposit.id}</p>
+      <CopyButton label="Copy deposit ID" text={deposit.id} />
       {deposit.delivery_hint && (
         <span className="hint-badge">Delivery: {deposit.delivery_hint}</span>
       )}
@@ -90,6 +123,11 @@ export function DepositStatusCard({
         <strong>{deposit.state}</strong> {deposit.confirmations}/
         {deposit.target_confirmations} confs
       </p>
+      {confirmationEtaText && (
+        <p className="status-meta">
+          Estimated time to mint: {confirmationEtaText}. We'll notify this device when the token is ready.
+        </p>
+      )}
       <p className="status-meta code">{deposit.address}</p>
       <CopyButton label="Copy address" text={deposit.address} />
       {deposit.state === 'ready' && (
@@ -102,7 +140,13 @@ export function DepositStatusCard({
           ) : (
             <p className="status-error">Pickup token unavailable for this deposit.</p>
           )}
-          {pickupError && <p className="status-error">{pickupError.message}</p>}
+          {pickupError && (
+            <p className="status-error">
+              {pickupError instanceof ApiClientError && pickupError.code === 'deposit_not_ready_for_pickup'
+                ? 'Token already revealed for this deposit. Check your clipboard or the delivery target; new reveals are blocked for safety.'
+                : pickupError.message}
+            </p>
+          )}
         </div>
       )}
       {deposit.txid && (
@@ -118,10 +162,21 @@ export function DepositStatusCard({
           <CopyButton label="Copy token" text={deposit.token} />
         </div>
       )}
-      <StatusTimeline stages={DEPOSIT_STAGES} current={deposit.state} />
+      <StatusTimeline
+        stages={
+          deposit.state === 'failed'
+            ? DEPOSIT_STAGES
+            : DEPOSIT_STAGES.filter((stage) => stage.key !== 'failed')
+        }
+        current={deposit.state}
+      />
       {onClear && (
-        <button type="button" className="link-button" onClick={onClear}>
-          Forget this deposit
+        <button
+          type="button"
+          className="link-button"
+          onClick={() => onClear(deposit)}
+        >
+          Archive this deposit
         </button>
       )}
     </div>
@@ -179,6 +234,11 @@ export function WithdrawalStatusCard({
       <p className="status-meta code">
         #{withdrawal.id} → {withdrawal.delivery_address}
       </p>
+      {withdrawal.error && (
+        <p className="status-error">
+          {withdrawal.error}
+        </p>
+      )}
       <CopyButton label="Copy destination" text={withdrawal.delivery_address} />
       {withdrawal.source_mint_url && (
         <p className={`status-meta ${withdrawal.is_foreign_mint ? 'warning' : ''}`}>
@@ -277,6 +337,76 @@ const buildBip21Uri = (address: string, amountSats?: number) => {
   }
   const btc = (amountSats / 1e8).toFixed(8).replace(/\.0+$/, '')
   return `bitcoin:${address}?amount=${btc}`
+}
+
+const getConfirmationEtaText = (deposit: Deposit): string | null => {
+  const remaining = Math.max(
+    0,
+    (deposit?.target_confirmations ?? 0) - (deposit?.confirmations ?? 0)
+  )
+
+  if (remaining <= 0) {
+    return null
+  }
+
+  const minutes = remaining * AVERAGE_BLOCK_MINUTES
+
+  if (minutes < 1) {
+    return 'less than a minute'
+  }
+
+  if (minutes < 60) {
+    return `≈ ${Math.max(1, Math.round(minutes))} min`
+  }
+
+  const hours = minutes / 60
+
+  if (hours < 24) {
+    return `≈ ${hours.toFixed(1)} h`
+  }
+
+  const days = hours / 24
+  return `≈ ${days.toFixed(1)} d`
+}
+
+const notifyDepositReady = () => {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+    try {
+      navigator.vibrate([160, 100, 160])
+    } catch {
+      // ignore vibration errors
+    }
+  }
+
+  const AudioCtor =
+    window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+
+  if (!AudioCtor) {
+    return
+  }
+
+  try {
+    const context = new AudioCtor()
+    const oscillator = context.createOscillator()
+    const gain = context.createGain()
+    oscillator.type = 'triangle'
+    oscillator.frequency.value = 880
+    gain.gain.value = 0.05
+    oscillator.connect(gain)
+    gain.connect(context.destination)
+    oscillator.start()
+
+    setTimeout(() => {
+      oscillator.stop()
+      context.close().catch(() => {})
+    }, 500)
+  } catch {
+    // ignore audio errors
+  }
 }
 
 type Stage<T extends string> = {
