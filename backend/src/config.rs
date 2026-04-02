@@ -10,6 +10,7 @@ use bdk::keys::bip39::{Language, Mnemonic};
 
 const DEFAULT_ADDRESS_POOL_TARGET: u32 = 20;
 const DEFAULT_DEPOSIT_TARGET_CONFIRMATIONS: u8 = 3;
+const DEFAULT_DEPOSIT_MIN_SATS: u64 = 50_000;
 const DEFAULT_WITHDRAWAL_TARGET_CONFIRMATIONS: u8 = 1;
 const CONFIRMATION_POLL_INTERVAL_SECS: u64 = 30;
 const DEFAULT_WITHDRAWAL_WORKER_INTERVAL_SECS: u64 = 15;
@@ -54,6 +55,7 @@ pub struct AppConfig {
     pub float_min_ratio: f32,
     pub float_max_ratio: f32,
     pub float_guard_interval: Duration,
+    pub deposit_min_sats: u64,
     pub withdrawal_min_sats: u64,
     pub float_drift_alert_ratio: f32,
     pub single_request_cap_ratio: f64,
@@ -140,6 +142,11 @@ impl AppConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|v| *v > 0)
             .unwrap_or(DEFAULT_WITHDRAWAL_MIN_SATS);
+        let deposit_min_sats = std::env::var("DEPOSIT_MIN_SATS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_DEPOSIT_MIN_SATS);
 
         let deposit_worker_interval = Duration::from_secs(
             std::env::var("DEPOSIT_WORKER_INTERVAL_SECS")
@@ -251,6 +258,7 @@ impl AppConfig {
             float_min_ratio,
             float_max_ratio,
             float_guard_interval,
+            deposit_min_sats,
             withdrawal_min_sats,
             float_drift_alert_ratio,
             single_request_cap_ratio,

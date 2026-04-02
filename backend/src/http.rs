@@ -127,6 +127,7 @@ struct ApiError {
 #[derive(Serialize)]
 struct PublicConfigResponse {
     withdrawal_min_sats: u64,
+    deposit_min_sats: u64,
     deposit_target_confirmations: u8,
     float_target_sats: u64,
     float_min_ratio: f32,
@@ -166,6 +167,7 @@ async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicCon
 
     let payload = PublicConfigResponse {
         withdrawal_min_sats: state.withdrawal_min_sats,
+        deposit_min_sats: state.deposit_min_sats,
         deposit_target_confirmations: state.deposit_target_confirmations,
         float_target_sats: state.float_target_sats,
         float_min_ratio: state.float_min_ratio,
@@ -697,16 +699,19 @@ async fn create_deposit(
     headers: HeaderMap,
     Json(req): Json<DepositRequest>,
 ) -> ApiResult<DepositCreateResponse> {
-    const MIN_DEPOSIT_SATS: u64 = super::MIN_DEPOSIT_SATS;
     const MAX_DEPOSIT_SATS: u64 = super::MAX_DEPOSIT_SATS;
+    let min_deposit_sats = state.deposit_min_sats;
 
     match state.current_operation_mode().await {
         OperationMode::Normal => {}
         mode => return Err(mode_blocked(mode, "deposits")),
     }
 
-    if req.amount_sats < MIN_DEPOSIT_SATS || req.amount_sats > MAX_DEPOSIT_SATS {
-        return Err(invalid_request("amount_sats is outside the allowed range"));
+    if req.amount_sats < min_deposit_sats || req.amount_sats > MAX_DEPOSIT_SATS {
+        return Err(invalid_request(format!(
+            "amount_sats must be between {} and {} sats",
+            min_deposit_sats, MAX_DEPOSIT_SATS
+        )));
     }
 
     let cashu_wallet = state

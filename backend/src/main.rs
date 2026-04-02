@@ -43,7 +43,6 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use urlencoding::encode as url_encode;
 
-const MIN_DEPOSIT_SATS: u64 = 50_000;
 const MAX_DEPOSIT_SATS: u64 = 2_000_000;
 const ADDRESS_POOL_REFILL_INTERVAL_SECS: u64 = 60;
 const ELECTRUM_RETRY: u8 = 5;
@@ -125,6 +124,7 @@ struct AppState {
     float_target_sats: u64,
     float_min_ratio: f32,
     float_max_ratio: f32,
+    deposit_min_sats: u64,
     withdrawal_min_sats: u64,
     single_request_cap_ratio: f64,
     session_ttl: ChronoDuration,
@@ -549,6 +549,7 @@ async fn main() -> Result<(), anyhow::Error> {
         float_target_sats: config.float_target_sats,
         float_min_ratio: config.float_min_ratio,
         float_max_ratio: config.float_max_ratio,
+        deposit_min_sats: config.deposit_min_sats,
         withdrawal_min_sats: config.withdrawal_min_sats,
         single_request_cap_ratio: config.single_request_cap_ratio,
         session_ttl: ChronoDuration::hours(DEFAULT_SESSION_TTL_HOURS),

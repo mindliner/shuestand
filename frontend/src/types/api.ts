@@ -200,6 +200,7 @@ export interface FloatStatusResponse {
 
 export interface PublicConfigResponse {
   withdrawal_min_sats: number
+  deposit_min_sats: number
   deposit_target_confirmations: number
   float_target_sats: number
   float_min_ratio: number

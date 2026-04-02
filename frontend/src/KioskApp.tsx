@@ -98,6 +98,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   const [sessionHydrationTick, setSessionHydrationTick] = useState(0)
   const [limits, setLimits] = useState(() => ({
     withdrawalMinSats: config.withdrawalMinSats,
+    depositMinSats: config.depositMinSats,
     depositFlowEnabled: true,
     depositFlowReason: null as string | null,
   }))
@@ -205,16 +206,21 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
         }
         const min = Number(runtime.withdrawal_min_sats)
         const resolvedMin = Number.isFinite(min) && min > 0 ? min : undefined
+        const depositMin = Number(runtime.deposit_min_sats)
+        const resolvedDepositMin =
+          Number.isFinite(depositMin) && depositMin > 0 ? depositMin : undefined
         const depositFlowEnabled = runtime.deposit_flow_enabled !== false
         const depositFlowReason = runtime.deposit_flow_reason ?? null
         setLimits((current) => {
           const next = {
             withdrawalMinSats: resolvedMin ?? current.withdrawalMinSats,
+            depositMinSats: resolvedDepositMin ?? current.depositMinSats,
             depositFlowEnabled,
             depositFlowReason,
           }
           if (
             next.withdrawalMinSats === current.withdrawalMinSats &&
+            next.depositMinSats === current.depositMinSats &&
             next.depositFlowEnabled === current.depositFlowEnabled &&
             next.depositFlowReason === current.depositFlowReason
           ) {
@@ -245,6 +251,16 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
       return limits.withdrawalMinSats.toString()
     })
   }, [limits.withdrawalMinSats])
+
+  useEffect(() => {
+    setDepositAmount((current) => {
+      const numeric = Number(current)
+      if (!Number.isFinite(numeric) || numeric >= limits.depositMinSats) {
+        return current
+      }
+      return limits.depositMinSats.toString()
+    })
+  }, [limits.depositMinSats])
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -717,9 +733,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           throw new Error(depositDisabledMessage)
         }
         const requestedAmount = Number(depositAmount)
-        if (!Number.isFinite(requestedAmount) || requestedAmount < config.depositMinSats) {
+        if (!Number.isFinite(requestedAmount) || requestedAmount < limits.depositMinSats) {
           throw new Error(
-            `Deposit amount must be at least ${config.depositMinSats.toLocaleString()} sats`
+            `Deposit amount must be at least ${limits.depositMinSats.toLocaleString()} sats`
           )
         }
         const selectedTarget = DELIVERY_TARGETS.find((target) => target.id === deliveryTarget)
@@ -971,13 +987,13 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                       Amount (sats)
                       <input
                         type="number"
-                        min={config.depositMinSats}
-                        value={depositAmount}
-                        onChange={(e) => setDepositAmount(e.target.value)}
-                        required
-                      />
-                      <span className="helper">Minimum {config.depositMinSats.toLocaleString()} sats</span>
-                    </label>
+                      min={limits.depositMinSats}
+                      value={depositAmount}
+                      onChange={(e) => setDepositAmount(e.target.value)}
+                      required
+                    />
+                    <span className="helper">Minimum {limits.depositMinSats.toLocaleString()} sats</span>
+                  </label>
                     <label>
                       Delivery target (optional)
                       <select
