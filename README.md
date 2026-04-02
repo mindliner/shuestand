@@ -38,14 +38,14 @@ cp backend.env.example backend.env
 docker compose -p shuestand up -d --build
 ```
 
-Now visit `http://localhost:8080` for the kiosk/operator UI; `/api` requests are reverse-proxied to the backend container.
+Now visit `http://localhost:8872` for the kiosk/operator UI (see the `8872:80` mapping in `infra/docker/docker-compose.yml`); `/api` requests are reverse-proxied to the backend container.
 
 Once running, update `infra/docker/backend.env` whenever you rotate keys/policies and restart the backend service (`docker compose restart backend`).
 
 ### Build From Source
 
 ```
-# start backend first
+# start backend first (listens on SHUESTAND_BACKEND_PORT, default 8080)
 git clone https://github.com/mindliner/shuestand.git
 cd shuestand/backend
 cp .env.example .your-env
@@ -98,4 +98,3 @@ When the Docker stack lives on an internal host (e.g., `vm-docker:8872`), expose
    ```
 
 3. **Reload nginx and verify HTTPS.** Visit `https://<domain>` and confirm that the kiosk loads and that the Nut18 QR transports point to the HTTPS host (the backend derives the callback URL from `Host` + `X-Forwarded-Proto`). Avoid double-proxy stacks that overwrite `X-Forwarded-Proto` with `http`, otherwise Cashu wallets will refuse to POST back to the funding endpoint.
-

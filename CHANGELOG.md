@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-04-02
+- Added optional webhook alerts (`FLOAT_ALERT_WEBHOOK_URL`) so float band/drift transitions emit JSON events (easy to feed into n8n or any monitoring pipeline).
+- Made the Bitcoin→Cashu minimum configurable via `DEPOSIT_MIN_SATS`, exposed it through `/api/v1/config`, and taught the kiosk to hydrate the runtime deposit + withdrawal floors (with better deposit-flow disable messaging).
+- Reworked the kiosk chrome: the active-session frame now spans the full width with the flow toggle + backend endpoint tucked inside, the landing copy reflects the “Shuestand: Privacy Focused B<->C” branding, and the README install instructions match the current Docker port mapping.
+
 ## 2026-03-29
 - Added detailed explanations to environment parameters (backend.env)
 - Fixed a bug with processing payment requests (now testing positively with Minibits and Macadamia).
