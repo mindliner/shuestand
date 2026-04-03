@@ -3,7 +3,7 @@
 Shuestand lets users fund a Cashu wallet directly with on-chain Bitcoin or withdraw cashu sats back out, all through a single, kiosk-friendly interface.
 
 ## Why Shuestand?
-Lightning swaps and do-it-yourself Cashu flows already exist with boltz.exchange, but not everybody who likes Bitplane’s promise wants to juggle routing nodes, mint swaps, or channel policy. Shuestand formalizes a simple dual strategy: save in hardened self-custody, spend from a lightweight privacy wallet, and let the bridge disappear into the background.
+Lightning swaps and do-it-yourself Cashu flows already exist with boltz.exchange, but not everybody who likes Bitcoin’s promise wants to juggle routing nodes, mint swaps, or channel policy. Shuestand formalizes a simple dual strategy: save in hardened self-custody, spend from a lightweight privacy wallet, and let the bridge disappear into the background.
 
 - **On-chain for large balances.** Big funds live in a multi-sig, time-locked, well-backed-up wallet where security trumps convenience and transaction counts stay low.
 - **Cashu for day-to-day balances.** Smaller, high-churn funds sit in a privacy-preserving custodial wallet where “it just works” matters more than ceremony.
