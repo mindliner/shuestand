@@ -590,6 +590,7 @@ async fn monitor_float_levels(
     }
 
     let mut drift_alert_active = false;
+    let mut last_total_balance: Option<u64> = None;
 
     loop {
         let onchain_snapshot =
@@ -664,67 +665,80 @@ async fn monitor_float_levels(
         }
 
         let total_balance = onchain_snapshot.balance_sats + cashu_snapshot.balance_sats;
-        let drift = target_sats as i64 - total_balance as i64;
+        let drift_vs_target = target_sats as i64 - total_balance as i64;
         if target_sats > 0 {
             let total_ratio = total_balance as f64 / target_sats as f64;
             metrics.set_total_float_ratio(total_ratio);
-            metrics.set_float_drift_sats(drift);
-            let drift_ratio = (drift.abs() as f64) / target_sats as f64;
-            if drift_ratio >= drift_alert_ratio as f64 {
-                if !drift_alert_active {
-                    tracing::warn!(
+            metrics.set_float_drift_sats(drift_vs_target);
+
+            if let Some(previous_total) = last_total_balance {
+                let delta = total_balance as i64 - previous_total as i64;
+                let delta_ratio = (delta.abs() as f64) / target_sats as f64;
+
+                if delta_ratio >= drift_alert_ratio as f64 {
+                    if !drift_alert_active {
+                        tracing::warn!(
+                            target: "backend",
+                            total_balance_sats = total_balance,
+                            previous_total_sats = previous_total,
+                            target_sats,
+                            delta_sats = delta,
+                            "total float change exceeded threshold"
+                        );
+                        drift_alert_active = true;
+                        if let Some(url) = alert_webhook_url.as_deref() {
+                            if let Err(err) = emit_float_drift_alert(
+                                url,
+                                "triggered",
+                                total_balance,
+                                target_sats,
+                                drift_vs_target,
+                                delta,
+                                previous_total,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    target: "backend",
+                                    error = %err,
+                                    "failed to send drift alert"
+                                );
+                            }
+                        }
+                    }
+                } else if drift_alert_active {
+                    tracing::info!(
                         target: "backend",
                         total_balance_sats = total_balance,
+                        previous_total_sats = previous_total,
                         target_sats,
-                        drift_sats = drift,
-                        "total float drift exceeded threshold"
+                        "total float change back within buffer"
                     );
-                    drift_alert_active = true;
+                    drift_alert_active = false;
                     if let Some(url) = alert_webhook_url.as_deref() {
                         if let Err(err) = emit_float_drift_alert(
                             url,
-                            "triggered",
+                            "cleared",
                             total_balance,
                             target_sats,
-                            drift,
+                            drift_vs_target,
+                            delta,
+                            previous_total,
                         )
                         .await
                         {
                             tracing::warn!(
                                 target: "backend",
                                 error = %err,
-                                "failed to send drift alert"
+                                "failed to send drift recovery alert"
                             );
                         }
                     }
                 }
-            } else if drift_alert_active {
-                tracing::info!(
-                    target: "backend",
-                    total_balance_sats = total_balance,
-                    target_sats,
-                    "total float drift back within guard rails"
-                );
-                drift_alert_active = false;
-                if let Some(url) = alert_webhook_url.as_deref() {
-                    if let Err(err) = emit_float_drift_alert(
-                        url,
-                        "cleared",
-                        total_balance,
-                        target_sats,
-                        drift,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            target: "backend",
-                            error = %err,
-                            "failed to send drift recovery alert"
-                        );
-                    }
-                }
             }
         }
+
+        last_total_balance = Some(total_balance);
 
         if auto_drain_threshold > 0 && total_balance <= auto_drain_threshold {
             let should_trigger = {
@@ -907,6 +921,8 @@ async fn emit_float_drift_alert(
     total_balance_sats: u64,
     target_sats: u64,
     drift_sats: i64,
+    delta_sats: i64,
+    previous_total_sats: u64,
 ) -> Result<(), reqwest::Error> {
     let payload = json!({
         "event": "float_drift_alert",
@@ -914,6 +930,8 @@ async fn emit_float_drift_alert(
         "total_balance_sats": total_balance_sats,
         "target_sats": target_sats,
         "drift_sats": drift_sats,
+        "delta_sats": delta_sats,
+        "previous_total_sats": previous_total_sats,
     });
     post_float_alert(url, payload).await
 }

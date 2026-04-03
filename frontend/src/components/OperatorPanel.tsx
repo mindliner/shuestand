@@ -9,7 +9,6 @@ import {
   getWalletBalance,
   getWalletTopup,
   getFloatStatus,
-  mintCashuInvoice,
   sendCashuToken,
   sendWalletPayment,
   syncWallet,
@@ -205,16 +204,16 @@ export function OperatorPanel() {
     },
   })
 
-  const mintMutation = useMutation({
-    mutationFn: () => mintCashuInvoice(token, activeQuoteId as string),
-    onSuccess: (res) => {
-      setFeedback(`Minted ${res.amount_sats} sats into Cashu wallet`)
+  const invoice = invoiceQuery.data
+
+  useEffect(() => {
+    if (!invoice || !token) {
+      return
+    }
+    if (invoice.state.toLowerCase() === 'issued') {
       queryClient.invalidateQueries({ queryKey: ['cashu-balance', token] })
-      queryClient.invalidateQueries({
-        queryKey: ['cashu-invoice', token, activeQuoteId],
-      })
-    },
-  })
+    }
+  }, [invoice, token, queryClient])
 
   const cashuSendMutation = useMutation({
     mutationFn: (amount: number) => sendCashuToken(token, { amount_sats: amount }),
@@ -443,10 +442,10 @@ export function OperatorPanel() {
     return `${uri}${joiner}amount=${encodeURIComponent(btc)}`
   }, [topupQuery.data?.bip21_uri, topupAmount])
 
-  const invoice = invoiceQuery.data
-  const canMint = Boolean(
-    activeQuoteId && invoice && invoice.state?.toLowerCase() === 'paid',
-  )
+  const autoMintHint =
+    activeQuoteId && invoice && invoice.state?.toLowerCase() === 'paid'
+      ? 'Paid — minting into float automatically…'
+      : null
 
   const modeOptions: { value: OperationMode; label: string }[] = [
     { value: 'normal', label: 'Normal' },
@@ -1139,17 +1138,8 @@ export function OperatorPanel() {
                       >
                         Refresh status
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => mintMutation.mutate()}
-                        disabled={!canMint || mintMutation.isPending}
-                      >
-                        {mintMutation.isPending ? 'Minting…' : 'Mint paid invoice'}
-                      </button>
                     </div>
-                    {mintMutation.isError && (
-                      <p className="status-error">{(mintMutation.error as Error).message}</p>
-                    )}
+                    {autoMintHint && <p className="helper">{autoMintHint}</p>}
                   </>
                 )}
               </section>

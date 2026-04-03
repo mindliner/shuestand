@@ -748,7 +748,7 @@ async fn create_deposit(
             "deposit request exceeds cashu float cap"
         );
         return Err(invalid_request(format!(
-            "amount_sats exceeds the current Cashu float cap ({} sats)",
+            "amount_sats exceeds the current transaction float cap ({} sats)",
             deposit_cap
         )));
     }
@@ -1396,13 +1396,32 @@ async fn get_cashu_invoice(
     Path(id): Path<String>,
 ) -> ApiResult<CashuInvoiceStatusResponse> {
     let wallet = cashu_guard(&state, &headers)?;
-    let quote = {
+    let mut quote = {
         let guard = wallet.lock().await;
         guard
             .check_mint_quote_status(&id)
             .await
             .map_err(server_error)?
     };
+
+    // Operator top-ups should be automatic: once a mint quote is paid, mint it into the wallet
+    // without requiring a separate manual click.
+    if quote.state == MintQuoteState::Paid {
+        {
+            let guard = wallet.lock().await;
+            guard
+                .mint(&id, SplitTarget::default(), None)
+                .await
+                .map_err(server_error)?;
+        }
+        quote = {
+            let guard = wallet.lock().await;
+            guard
+                .check_mint_quote_status(&id)
+                .await
+                .map_err(server_error)?
+        };
+    }
     Ok(Json(ApiResponse {
         data: map_quote_response(quote),
     }))

@@ -1,5 +1,5 @@
 import type { FormEvent } from 'react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 const STORAGE_KEYS = {
@@ -96,6 +96,8 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   const [resumeCode, setResumeCode] = useState('')
   const [resumeFlowHint, setResumeFlowHint] = useState(false)
   const [sessionHydrationTick, setSessionHydrationTick] = useState(0)
+  const [floatingNotice, setFloatingNotice] = useState<string | null>(null)
+  const floatingNoticeTimer = useRef<number | null>(null)
   const [limits, setLimits] = useState(() => ({
     withdrawalMinSats: config.withdrawalMinSats,
     depositMinSats: config.depositMinSats,
@@ -103,6 +105,28 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     depositFlowReason: null as string | null,
   }))
   const navigate = useNavigate()
+
+  const showFloatingNotice = (text: string) => {
+    setFloatingNotice(text)
+    if (typeof window === 'undefined') {
+      return
+    }
+    if (floatingNoticeTimer.current) {
+      window.clearTimeout(floatingNoticeTimer.current)
+    }
+    floatingNoticeTimer.current = window.setTimeout(() => {
+      setFloatingNotice(null)
+      floatingNoticeTimer.current = null
+    }, 5000)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (floatingNoticeTimer.current && typeof window !== 'undefined') {
+        window.clearTimeout(floatingNoticeTimer.current)
+      }
+    }
+  }, [])
 
   const scopedKey = (base: string, sessionId: string) => `${base}.${sessionId}`
 
@@ -612,12 +636,18 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
       if (resp?.token) {
         const copied = await copyTextWithFallback(resp.token)
         if (copied) {
-          setMessage(`Token revealed and copied to clipboard. ${warning}`)
+          const notice = `Token revealed and copied to clipboard. ${warning}`
+          setMessage(notice)
+          showFloatingNotice(notice)
         } else {
-          setMessage(`Token revealed but automatic copy failed. Token: ${resp.token} ${warning}`)
+          const notice = `Token revealed but automatic copy failed. Token: ${resp.token} ${warning}`
+          setMessage(notice)
+          showFloatingNotice(notice)
         }
       } else {
-        setMessage(`Token revealed. ${warning}`)
+        const notice = `Token revealed. ${warning}`
+        setMessage(notice)
+        showFloatingNotice(notice)
       }
       if (variables?.id) {
         queryClient.invalidateQueries({ queryKey: ['deposit', variables.id] })
@@ -901,6 +931,11 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
 
   return (
     <main className="app-shell">
+      {floatingNotice && (
+        <div className="floating-toast">
+          <p>{floatingNotice}</p>
+        </div>
+      )}
       <header>
         <div>
           <p className="eyebrow">shuestand · cashu ↔ bitcoin</p>
