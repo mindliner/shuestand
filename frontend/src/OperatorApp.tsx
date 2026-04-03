@@ -1,5 +1,6 @@
 import { useNavigate } from 'react-router-dom'
 import { OperatorPanel } from './components/OperatorPanel'
+import { AppVersion } from './components/AppVersion'
 import type { Theme } from './lib/theme'
 
 type OperatorAppProps = {
@@ -52,6 +53,7 @@ export function OperatorApp({ theme, onThemeSelect }: OperatorAppProps) {
           <OperatorPanel />
         </div>
       </section>
+      <AppVersion />
     </main>
   )
 }

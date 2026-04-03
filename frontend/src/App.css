@@ -88,6 +88,14 @@ main.app-shell {
   gap: 2rem;
 }
 
+.app-version-banner {
+  margin-top: 1rem;
+  font-size: 0.75rem;
+  color: var(--color-text-subtle);
+  text-align: center;
+  opacity: 0.8;
+}
+
 header {
   display: flex;
   flex-wrap: wrap;

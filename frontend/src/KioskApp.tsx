@@ -35,6 +35,7 @@ import {
   DepositStatusCard,
   WithdrawalStatusCard,
 } from './components/KioskStatusCards'
+import { AppVersion } from './components/AppVersion'
 
 type Flow = 'deposit' | 'withdrawal'
 type KioskAppProps = {
@@ -1249,6 +1250,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           </>
         )}
       </section>
+      <AppVersion />
     </main>
   )
 }
