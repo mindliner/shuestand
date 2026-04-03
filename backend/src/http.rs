@@ -20,6 +20,8 @@ use uuid::Uuid;
 
 use crate::AppState;
 use backend::cashu::{TokenMintError, token_fingerprint, token_mint_url, token_total_amount};
+use cdk::nuts::Token;
+use cdk::nuts::nut00::token::TokenV3;
 use backend::db::{Deposit, DepositState, Session, StateLiabilityRow, Withdrawal, WithdrawalState};
 use backend::onchain::{OnchainBalance, OnchainWallet};
 use backend::operations::OperationMode;
@@ -1137,14 +1139,13 @@ async fn submit_payment_request(
         let expected_norm = normalize_mint_url(expected);
         let actual_norm = normalize_mint_url(&payload.mint);
         if actual_norm != expected_norm {
-            tracing::warn!(
+            tracing::info!(
                 target: "backend",
                 withdrawal_id = %withdrawal.id,
                 expected_mint = %expected,
                 actual_mint = %payload.mint,
-                "payment request mint mismatch"
+                "accepting foreign mint payment; token will be swapped to canonical during redemption"
             );
-            return Err(invalid_request("mint_mismatch"));
         }
     }
 
@@ -1184,6 +1185,20 @@ async fn submit_payment_request(
                         }
                     }
                 }
+                if let Some(id_value) = map.get_mut("id") {
+                    if let serde_json::Value::String(id_str) = id_value {
+                        if id_str.len() > 16 {
+                            tracing::debug!(
+                                target: "backend",
+                                withdrawal_id = %withdrawal_id,
+                                short_id = %&id_str[..16],
+                                full_id = %id_str,
+                                "truncating proof keyset id to 8-byte short form"
+                            );
+                            id_str.truncate(16);
+                        }
+                    }
+                }
                 serde_json::Value::Object(map)
             } else {
                 value.clone()
@@ -1207,19 +1222,21 @@ async fn submit_payment_request(
             "failed to write debug token snapshot"
         );
     }
-    let encoded = format!("cashuA{}", URL_SAFE_NO_PAD.encode(token_body.as_bytes()));
-    let amount = match token_total_amount(&encoded) {
-        Ok(value) => value,
-        Err(err) => {
-            tracing::warn!(
-                target: "backend",
-                withdrawal_id = %withdrawal.id,
-                error = %err,
-                "failed to decode payment request token"
-            );
-            return Err(map_token_error(err));
-        }
-    };
+    let token_v3: TokenV3 = serde_json::from_str(&token_body).map_err(|err| {
+        tracing::warn!(
+            target: "backend",
+            withdrawal_id = %withdrawal.id,
+            error = %err,
+            "failed to deserialize payment request token"
+        );
+        invalid_request("invalid proof payload")
+    })?;
+    let token_struct = Token::TokenV3(token_v3);
+    let encoded = token_struct.to_string();
+    let amount = token_struct
+        .value()
+        .map_err(|_| invalid_request("token references multiple mints"))?
+        .to_u64();
     if let Some(expected) = withdrawal.requested_amount_sats {
         if amount < expected {
             tracing::warn!(
