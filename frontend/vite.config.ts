@@ -7,14 +7,17 @@ const pkg = JSON.parse(
   readFileSync(new URL('./package.json', import.meta.url), 'utf-8')
 )
 
-const backendManifest = readFileSync(
-  new URL('../backend/Cargo.toml', import.meta.url),
-  'utf-8'
-)
-
 const backendVersion = (() => {
-  const match = backendManifest.match(/^\s*version\s*=\s*"([^"]+)"/m)
-  return match?.[1] ?? pkg.version ?? '0.0.0'
+  try {
+    const backendManifest = readFileSync(
+      new URL('../backend/Cargo.toml', import.meta.url),
+      'utf-8'
+    )
+    const match = backendManifest.match(/^\s*version\s*=\s*"([^"]+)"/m)
+    return match?.[1] ?? pkg.version ?? '0.0.0'
+  } catch {
+    return pkg.version ?? '0.0.0'
+  }
 })()
 
 const commitHash = (() => {

@@ -4,6 +4,8 @@ WORKDIR /app
 COPY frontend/package*.json ./
 RUN npm install
 COPY frontend ./
+COPY .git ./.git
+COPY backend/Cargo.toml /backend/Cargo.toml
 ARG VITE_SHUESTAND_API_BASE=
 ENV VITE_SHUESTAND_API_BASE=$VITE_SHUESTAND_API_BASE
 RUN npm run build
