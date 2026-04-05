@@ -208,6 +208,7 @@ export interface PublicConfigResponse {
   single_request_cap_ratio: number
   deposit_flow_enabled: boolean
   deposit_flow_reason?: string | null
+  cashu_mint_url?: string | null
 }
 
 export type OperationMode = 'normal' | 'drain' | 'halt'

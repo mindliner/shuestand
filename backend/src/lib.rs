@@ -5,5 +5,6 @@ pub mod db;
 pub mod onchain;
 pub mod operations;
 pub mod telemetry;
+pub mod transactions;
 pub mod wallet;
 pub mod workers;

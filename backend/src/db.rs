@@ -10,7 +10,8 @@ use sqlx::{
 };
 use std::str::FromStr;
 
-const DEPOSIT_SELECT_FIELDS: &str = "id, amount_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, minted_token, minted_amount_sats, token_ready_at, mint_attempt_count, last_mint_attempt_at, mint_error, delivery_attempt_count, last_delivery_attempt_at, delivery_error, pickup_token, pickup_revealed_at, session_id";
+const DEPOSIT_SELECT_FIELDS: &str = "id, amount_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, minted_token, minted_amount_sats, token_ready_at, mint_attempt_count, last_mint_attempt_at, mint_error, delivery_attempt_count, last_delivery_attempt_at, delivery_error, pickup_token, pickup_revealed_at, session_id, transaction_counted_at";
+const TRANSACTION_COUNTER_KEY: &str = "transaction_counter";
 
 #[derive(Clone)]
 pub struct Database {
@@ -51,6 +52,30 @@ impl Database {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn increment_transaction_counter(&self) -> Result<i64, Error> {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO app_settings (key, value)
+            VALUES ($1, '1')
+            ON CONFLICT (key)
+            DO UPDATE
+            SET value = ((app_settings.value::bigint + 1)::text),
+                updated_at = NOW()
+            RETURNING value
+            "#,
+        )
+        .bind(TRANSACTION_COUNTER_KEY)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let value: String = row.try_get("value")?;
+        value.parse::<i64>().map_err(|err| {
+            Error::Decode(BoxDynError::from(format!(
+                "invalid transaction counter value: {err}"
+            )))
+        })
     }
 
     pub async fn insert_deposit(&self, deposit: &Deposit) -> Result<(), Error> {
@@ -364,6 +389,23 @@ impl Database {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn mark_withdrawal_transaction_counted(
+        &self,
+        withdrawal_id: &str,
+    ) -> Result<bool, Error> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"UPDATE withdrawals
+                SET transaction_counted_at = $2
+              WHERE id = $1 AND transaction_counted_at IS NULL"#,
+        )
+        .bind(withdrawal_id)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn record_payment_request_token(&self, id: &str, token: &str) -> Result<(), Error> {
@@ -714,6 +756,20 @@ impl Database {
         }
 
         Ok(())
+    }
+
+    pub async fn mark_deposit_transaction_counted(&self, deposit_id: &str) -> Result<bool, Error> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"UPDATE deposits
+                SET transaction_counted_at = $2
+              WHERE id = $1 AND transaction_counted_at IS NULL"#,
+        )
+        .bind(deposit_id)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Atomically claims the minted ecash for a deposit exactly once.

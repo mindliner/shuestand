@@ -20,15 +20,15 @@ use uuid::Uuid;
 
 use crate::AppState;
 use backend::cashu::{TokenMintError, token_fingerprint, token_mint_url, token_total_amount};
-use cdk::nuts::Token;
-use cdk::nuts::nut00::token::TokenV3;
 use backend::db::{Deposit, DepositState, Session, StateLiabilityRow, Withdrawal, WithdrawalState};
 use backend::onchain::{OnchainBalance, OnchainWallet};
 use backend::operations::OperationMode;
 use backend::wallet::WalletHandle;
 use cdk::Amount;
 use cdk::amount::SplitTarget;
+use cdk::nuts::Token;
 use cdk::nuts::nut00::KnownMethod;
+use cdk::nuts::nut00::token::TokenV3;
 use cdk::nuts::{MintQuoteState, PaymentMethod};
 use cdk::wallet::{MintQuote, SendOptions};
 use urlencoding::encode;
@@ -60,8 +60,7 @@ const DEFAULT_DEPOSIT_STATES: [DepositState; 6] = [
 ];
 const CASHU_WALLET_UNAVAILABLE_MESSAGE: &str =
     "Cashu wallet unavailable; please contact the operator";
-const CASHU_FLOAT_DEPLETED_MESSAGE: &str =
-    "Cashu float is depleted; please contact the operator";
+const CASHU_FLOAT_DEPLETED_MESSAGE: &str = "Cashu float is depleted; please contact the operator";
 const DEPOSIT_FLOAT_TOO_LOW_MESSAGE: &str = "Float too low, please contact operator";
 
 pub fn router(state: AppState) -> Router {
@@ -138,29 +137,23 @@ struct PublicConfigResponse {
     deposit_flow_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     deposit_flow_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cashu_mint_url: Option<String>,
 }
 
 async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicConfigResponse> {
     let (deposit_flow_enabled, deposit_flow_reason) = if state.cashu_wallet.is_none() {
-        (
-            false,
-            Some(CASHU_WALLET_UNAVAILABLE_MESSAGE.to_string()),
-        )
+        (false, Some(CASHU_WALLET_UNAVAILABLE_MESSAGE.to_string()))
     } else {
         let snapshot = state.float_status.read().await.clone();
         let cashu_balance = snapshot.cashu.balance_sats;
         if cashu_balance == 0 {
-            (
-                false,
-                Some(CASHU_FLOAT_DEPLETED_MESSAGE.to_string()),
-            )
+            (false, Some(CASHU_FLOAT_DEPLETED_MESSAGE.to_string()))
         } else {
-            let deposit_cap = ((cashu_balance as f64) * state.single_request_cap_ratio).floor() as u64;
+            let deposit_cap =
+                ((cashu_balance as f64) * state.single_request_cap_ratio).floor() as u64;
             if deposit_cap < state.withdrawal_min_sats {
-                (
-                    false,
-                    Some(DEPOSIT_FLOAT_TOO_LOW_MESSAGE.to_string()),
-                )
+                (false, Some(DEPOSIT_FLOAT_TOO_LOW_MESSAGE.to_string()))
             } else {
                 (true, None)
             }
@@ -177,6 +170,7 @@ async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicCon
         single_request_cap_ratio: state.single_request_cap_ratio,
         deposit_flow_enabled,
         deposit_flow_reason,
+        cashu_mint_url: state.cashu_mint_url.clone(),
     };
 
     Ok(Json(ApiResponse { data: payload }))
@@ -853,6 +847,10 @@ async fn pickup_deposit(
         token_fingerprint = %token_fingerprint(&minted),
         "deposit pickup served token"
     );
+
+    if let Some(notifier) = &state.transaction_notifier {
+        notifier.record_deposit(&id).await;
+    }
 
     Ok(Json(ApiResponse {
         data: DepositPickupResponse { token: minted },
@@ -1939,7 +1937,7 @@ async fn send_cashu_token(
             .await
             .map_err(server_error)?;
         let confirmed = prepared.confirm(None).await.map_err(server_error)?;
-        confirmed.to_string()
+        confirmed.to_v3_string()
     };
 
     Ok(Json(ApiResponse {

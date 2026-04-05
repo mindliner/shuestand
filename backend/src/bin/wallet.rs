@@ -322,7 +322,7 @@ async fn send_tokens(wallet: &WalletHandle, amount: u64, output: Option<&PathBuf
         let prepared = guard
             .prepare_send(Amount::from(amount), SendOptions::default())
             .await?;
-        prepared.confirm(None).await?.to_string()
+        prepared.confirm(None).await?.to_v3_string()
     };
 
     if let Some(path) = output {

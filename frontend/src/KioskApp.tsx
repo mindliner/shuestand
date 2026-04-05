@@ -104,6 +104,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     depositMinSats: config.depositMinSats,
     depositFlowEnabled: true,
     depositFlowReason: null as string | null,
+    cashuMintUrl: config.cashuMintUrl ? config.cashuMintUrl.trim() : '',
   }))
   const navigate = useNavigate()
 
@@ -236,18 +237,22 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           Number.isFinite(depositMin) && depositMin > 0 ? depositMin : undefined
         const depositFlowEnabled = runtime.deposit_flow_enabled !== false
         const depositFlowReason = runtime.deposit_flow_reason ?? null
+        const runtimeMint =
+          typeof runtime.cashu_mint_url === 'string' ? runtime.cashu_mint_url.trim() : ''
         setLimits((current) => {
           const next = {
             withdrawalMinSats: resolvedMin ?? current.withdrawalMinSats,
             depositMinSats: resolvedDepositMin ?? current.depositMinSats,
             depositFlowEnabled,
             depositFlowReason,
+            cashuMintUrl: runtimeMint,
           }
           if (
             next.withdrawalMinSats === current.withdrawalMinSats &&
             next.depositMinSats === current.depositMinSats &&
             next.depositFlowEnabled === current.depositFlowEnabled &&
-            next.depositFlowReason === current.depositFlowReason
+            next.depositFlowReason === current.depositFlowReason &&
+            next.cashuMintUrl === current.cashuMintUrl
           ) {
             return current
           }
@@ -734,6 +739,8 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     }
   }
 
+  const canonicalMintUrl = limits.cashuMintUrl || (config.cashuMintUrl ? config.cashuMintUrl.trim() : '')
+
   const handleTokenChange = (value: string) => {
     setToken(value)
     const detected = detectTokenMint(value)
@@ -745,7 +752,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
       setTokenMintInfo({ error: detected.error })
       return
     }
-    const expectedMint = config.cashuMintUrl
+    const expectedMint = canonicalMintUrl
     const isForeign = Boolean(expectedMint && detected.mintUrl !== expectedMint)
     setTokenMintInfo({ mintUrl: detected.mintUrl, isForeign, amount: detected.amount })
   }
@@ -1019,6 +1026,11 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                   </div>
                 ) : (
                   <>
+                    {canonicalMintUrl && (
+                      <p className="helper subtle">
+                        Bitcoin → Cashu swaps return ecash of {canonicalMintUrl}.
+                      </p>
+                    )}
                     <label>
                       Amount (sats)
                       <input

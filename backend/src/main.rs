@@ -7,6 +7,7 @@ use backend::db::{Database, DepositState, WithdrawalState};
 use backend::onchain::{BlockchainClient, OnchainWallet, TxStatus};
 use backend::operations::OperationMode;
 use backend::telemetry::AppMetrics;
+use backend::transactions::TransactionNotifier;
 use backend::wallet::{
     MintSwapService, MultiMintWalletManager, WalletConfig, WalletHandle, open_wallet,
 };
@@ -128,6 +129,7 @@ struct AppState {
     withdrawal_min_sats: u64,
     single_request_cap_ratio: f64,
     session_ttl: ChronoDuration,
+    transaction_notifier: Option<Arc<TransactionNotifier>>,
 }
 
 impl AppState {
@@ -165,6 +167,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let db = Database::connect(&database_url).await?;
     tracing::info!(target: "backend", "connected to database");
+
+    let transaction_notifier =
+        TransactionNotifier::maybe_new(db.clone(), config.transaction_webhook_url.clone())
+            .map(Arc::new);
 
     let initial_operation_mode = match db.load_operation_mode().await {
         Ok(mode) => mode,
@@ -495,6 +501,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 config.deposit_worker_max_attempts,
                 Client::new(),
                 operation_mode.clone(),
+                transaction_notifier.clone(),
             );
             tokio::spawn(async move {
                 worker.run().await;
@@ -514,14 +521,20 @@ async fn main() -> Result<(), anyhow::Error> {
         let poll_every = config.confirmation_poll_interval;
         let target_conf = config.withdrawal_target_confirmations;
         let mode_handle = operation_mode.clone();
+        let tx_notifier = transaction_notifier.clone();
         tokio::spawn(async move {
             loop {
                 if matches!(*mode_handle.read().await, OperationMode::Halt) {
                     sleep(poll_every).await;
                     continue;
                 }
-                if let Err(err) =
-                    process_withdrawal_settlements(&watcher_db, wallet.clone(), target_conf).await
+                if let Err(err) = process_withdrawal_settlements(
+                    &watcher_db,
+                    wallet.clone(),
+                    target_conf,
+                    tx_notifier.clone(),
+                )
+                .await
                 {
                     tracing::error!(target: "backend", error = %err, "withdrawal confirmation pass failed");
                 }
@@ -553,6 +566,7 @@ async fn main() -> Result<(), anyhow::Error> {
         withdrawal_min_sats: config.withdrawal_min_sats,
         single_request_cap_ratio: config.single_request_cap_ratio,
         session_ttl: ChronoDuration::hours(DEFAULT_SESSION_TTL_HOURS),
+        transaction_notifier: transaction_notifier.clone(),
     };
 
     let app = http::router(state).layer(cors);
@@ -936,10 +950,7 @@ async fn emit_float_drift_alert(
     post_float_alert(url, payload).await
 }
 
-async fn post_float_alert(
-    url: &str,
-    payload: serde_json::Value,
-) -> Result<(), reqwest::Error> {
+async fn post_float_alert(url: &str, payload: serde_json::Value) -> Result<(), reqwest::Error> {
     Client::new()
         .post(url)
         .json(&payload)
@@ -1004,6 +1015,7 @@ async fn process_withdrawal_settlements(
     db: &Database,
     wallet: Arc<OnchainWallet>,
     target_confirmations: u8,
+    transaction_notifier: Option<Arc<TransactionNotifier>>,
 ) -> Result<(), anyhow::Error> {
     let tracked = db
         .list_withdrawals_by_state(&[WithdrawalState::Broadcasting, WithdrawalState::Confirming])
@@ -1038,6 +1050,9 @@ async fn process_withdrawal_settlements(
                     db.update_withdrawal_chain_state(&withdrawal.id, WithdrawalState::Settled)
                         .await?;
                     tracing::info!(target: "backend", withdrawal_id = %withdrawal.id, txid = txid, target_confirmations = target_confirmations, "withdrawal reached confirmation target");
+                    if let Some(notifier) = transaction_notifier.as_ref() {
+                        notifier.record_withdrawal(&withdrawal.id).await;
+                    }
                 }
             }
         }

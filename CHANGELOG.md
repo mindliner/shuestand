@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-04-05
+- Added transaction webhook (`TRANSACTION_WEBHOOK_URL`)
+- Added information about the canonical mint to the kios so users understand where the cashu token come from
 ## 2026-04-02
 - Added optional webhook alerts (`FLOAT_ALERT_WEBHOOK_URL`) so float band/drift transitions emit JSON events (easy to feed into n8n or any monitoring pipeline).
 - Made the Bitcoin→Cashu minimum configurable via `DEPOSIT_MIN_SATS`, exposed it through `/api/v1/config`, and taught the kiosk to hydrate the runtime deposit + withdrawal floors (with better deposit-flow disable messaging).

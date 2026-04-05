@@ -54,7 +54,12 @@ impl MintSwapService {
     ) -> anyhow::Result<MintSwapOutcome> {
         let foreign_wallet = self.manager.wallet_for_mint(foreign_mint_url).await?;
         let original_amount = self
-            .receive_foreign_token(&foreign_wallet, foreign_mint_url, token_raw, expected_amount)
+            .receive_foreign_token(
+                &foreign_wallet,
+                foreign_mint_url,
+                token_raw,
+                expected_amount,
+            )
             .await?;
         if original_amount == 0 {
             return Err(anyhow!("foreign token had zero value"));

@@ -12,6 +12,7 @@ use tokio::time::sleep;
 
 use crate::db::{Database, DepositState};
 use crate::operations::OperationMode;
+use crate::transactions::TransactionNotifier;
 
 pub struct DepositWorker {
     db: Database,
@@ -20,6 +21,7 @@ pub struct DepositWorker {
     max_attempts: u32,
     http: Client,
     operation_mode: Arc<RwLock<OperationMode>>,
+    transaction_notifier: Option<Arc<TransactionNotifier>>,
 }
 
 impl DepositWorker {
@@ -30,6 +32,7 @@ impl DepositWorker {
         max_attempts: u32,
         http: Client,
         operation_mode: Arc<RwLock<OperationMode>>,
+        transaction_notifier: Option<Arc<TransactionNotifier>>,
     ) -> Self {
         Self {
             db,
@@ -38,6 +41,7 @@ impl DepositWorker {
             max_attempts: max_attempts.max(1),
             http,
             operation_mode,
+            transaction_notifier,
         }
     }
 
@@ -162,6 +166,7 @@ impl DepositWorker {
                                     .record_delivery_success(&deposit.id, DepositState::Ready)
                                     .await?;
                                 self.db.record_pickup_success(&deposit.id).await?;
+                                self.notify_deposit_completed(&deposit.id).await;
                                 continue;
                             }
                             Err(err) => {
@@ -207,6 +212,12 @@ impl DepositWorker {
         }
 
         Ok(())
+    }
+
+    async fn notify_deposit_completed(&self, deposit_id: &str) {
+        if let Some(notifier) = &self.transaction_notifier {
+            notifier.record_deposit(deposit_id).await;
+        }
     }
 
     async fn deliver_webhook(
@@ -295,7 +306,7 @@ impl DepositTokenSender for CashuTokenSender {
         let token = prepared.confirm(None).await?;
         Ok(MintedToken {
             amount_sats,
-            token: token.to_string(),
+            token: token.to_v3_string(),
         })
     }
 }
