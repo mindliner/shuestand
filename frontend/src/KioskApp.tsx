@@ -15,7 +15,6 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import './App.css'
 import { config } from './config'
 import { copyTextWithFallback } from './lib/clipboard'
-import { DELIVERY_TARGETS } from './config/deliveryTargets'
 import { detectTokenMint } from './lib/cashu'
 import { isValidBitcoinAddress } from './lib/bitcoin'
 import type { Theme } from './lib/theme'
@@ -80,8 +79,6 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   const [withdrawalMethod, setWithdrawalMethod] = useState<'token' | 'payment_request'>(
     'token'
   )
-  const [deliveryTarget, setDeliveryTarget] = useState('manual')
-  const [customDeliveryHint, setCustomDeliveryHint] = useState('')
   const [token, setToken] = useState('')
   const [tokenMintInfo, setTokenMintInfo] = useState<TokenMintInfo | null>(null)
   const [deliveryAddress, setDeliveryAddress] = useState('')
@@ -92,6 +89,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   const [withdrawals, setWithdrawals] = useState<StoredWithdrawal[]>([])
   const [selectedWithdrawalId, setSelectedWithdrawalId] = useState<string | null>(null)
   const [archivedEntries, setArchivedEntries] = useState<ArchivedEntry[]>([])
+  const [revealedTokens, setRevealedTokens] = useState<Record<string, string>>({})
   const [session, setSession] = useState<SessionInfo | null>(null)
   const [sessionBusy, setSessionBusy] = useState(false)
   const [resumeCode, setResumeCode] = useState('')
@@ -179,6 +177,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     setWithdrawals([])
     setSelectedWithdrawalId(null)
     setArchivedEntries([])
+    setRevealedTokens({})
   }
 
   const applySessionPayload = (payload: SessionStartResponse, opts?: { resumed?: boolean }) => {
@@ -640,6 +639,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     onSuccess: async (resp, variables) => {
       const warning = 'Paste it immediately — this app will not display the token again.'
       if (resp?.token) {
+        setRevealedTokens((current) => ({ ...current, [variables.id]: resp.token }))
         const copied = await copyTextWithFallback(resp.token)
         if (copied) {
           const notice = `Token revealed and copied to clipboard. ${warning}`
@@ -776,15 +776,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
             `Deposit amount must be at least ${limits.depositMinSats.toLocaleString()} sats`
           )
         }
-        const selectedTarget = DELIVERY_TARGETS.find((target) => target.id === deliveryTarget)
-        const resolvedHint =
-          deliveryTarget === 'custom'
-            ? customDeliveryHint.trim()
-            : selectedTarget?.hint ?? null
         const payload = {
           amount_sats: requestedAmount,
           metadata: { source: 'ui-proto' },
-          delivery_hint: resolvedHint || undefined,
         }
         const creation = await createDeposit(payload, sessionToken)
         rememberDeposit(creation.deposit.id, creation.pickup_token)
@@ -800,7 +794,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
         if (!isValidBitcoinAddress(normalizedAddress)) {
           throw new Error('Enter a valid Bitcoin address (bc1…, 1…, or 3…).')
         }
-        let payload: CreateWithdrawalRequest = {
+        const payload: CreateWithdrawalRequest = {
           amount_sats: resolvedAmount,
           delivery_address: normalizedAddress,
         }
@@ -1042,36 +1036,6 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                     />
                     <span className="helper">Minimum {limits.depositMinSats.toLocaleString()} sats</span>
                   </label>
-                    <label>
-                      Delivery target (optional)
-                      <select
-                        value={deliveryTarget}
-                        onChange={(e) => setDeliveryTarget(e.target.value)}
-                      >
-                        {DELIVERY_TARGETS.map((target) => (
-                          <option key={target.id} value={target.id}>
-                            {target.label}
-                          </option>
-                        ))}
-                      </select>
-                      <span className="helper">
-                        {
-                          DELIVERY_TARGETS.find((target) => target.id === deliveryTarget)
-                            ?.description
-                        }
-                      </span>
-                    </label>
-                    {deliveryTarget === 'custom' && (
-                      <label>
-                        Custom delivery URL
-                        <input
-                          type="text"
-                          value={customDeliveryHint}
-                          onChange={(e) => setCustomDeliveryHint(e.target.value)}
-                          placeholder="cashu://wallet/… or https://webhook"
-                        />
-                      </label>
-                    )}
                   </>
                 )
               ) : (
@@ -1200,6 +1164,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                     isLoading={depositLoading}
                     hasSubmission={Boolean(selectedDepositId)}
                     pickupToken={selectedDeposit?.pickupToken ?? null}
+                    revealedToken={selectedDepositId ? revealedTokens[selectedDepositId] ?? null : null}
                     onPickup={handleDepositPickup}
                     pickupPending={pickupMutation.isPending}
                     pickupError={pickupError}

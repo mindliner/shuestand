@@ -395,14 +395,14 @@ impl Database {
         &self,
         withdrawal_id: &str,
     ) -> Result<bool, Error> {
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
         let result = sqlx::query(
             r#"UPDATE withdrawals
                 SET transaction_counted_at = $2
               WHERE id = $1 AND transaction_counted_at IS NULL"#,
         )
         .bind(withdrawal_id)
-        .bind(&now)
+        .bind(now)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() == 1)
@@ -759,14 +759,14 @@ impl Database {
     }
 
     pub async fn mark_deposit_transaction_counted(&self, deposit_id: &str) -> Result<bool, Error> {
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
         let result = sqlx::query(
             r#"UPDATE deposits
                 SET transaction_counted_at = $2
               WHERE id = $1 AND transaction_counted_at IS NULL"#,
         )
         .bind(deposit_id)
-        .bind(&now)
+        .bind(now)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() == 1)

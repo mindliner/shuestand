@@ -675,8 +675,8 @@ export function OperatorPanel() {
             ) : cleanupItems.length === 0 ? (
               <p>No withdrawals need manual cleanup right now.</p>
             ) : (
-              <div className="operator-table">
-                <table>
+              <div className="operator-table-scroll">
+                <table className="operator-table condensed-table">
                   <thead>
                     <tr>
                       <th>ID</th>
@@ -704,32 +704,32 @@ export function OperatorPanel() {
                               <span className="status-meta">{createdAt}</span>
                             </div>
                           </td>
-                          <td>{wd.state}</td>
+                          <td>
+                            <span className="status-pill compact">{wd.state}</span>
+                          </td>
                           <td>{formatSats(amount)} sats</td>
                           <td className="status-meta code">{wd.delivery_address}</td>
                           <td className="status-meta code">{wd.txid ?? '—'}</td>
-                          <td>
-                            <div className="cleanup-inputs">
-                              <label>
-                                Failure note
-                                <input
-                                  type="text"
-                                  value={cleanupNotes[wd.id] ?? ''}
-                                  onChange={(e) => handleCleanupNoteChange(wd.id, e.target.value)}
-                                  placeholder="optional"
-                                />
-                              </label>
-                              <label>
-                                Override txid
-                                <input
-                                  type="text"
-                                  value={cleanupTxids[wd.id] ?? ''}
-                                  onChange={(e) => handleCleanupTxidChange(wd.id, e.target.value)}
-                                  placeholder="leave blank to reuse"
-                                />
-                              </label>
+                          <td className="actions-cell">
+                            <div className="table-inputs">
+                              <input
+                                type="text"
+                                aria-label="Failure note"
+                                className="table-input"
+                                value={cleanupNotes[wd.id] ?? ''}
+                                onChange={(e) => handleCleanupNoteChange(wd.id, e.target.value)}
+                                placeholder="Failure note"
+                              />
+                              <input
+                                type="text"
+                                aria-label="Override txid"
+                                className="table-input"
+                                value={cleanupTxids[wd.id] ?? ''}
+                                onChange={(e) => handleCleanupTxidChange(wd.id, e.target.value)}
+                                placeholder="Override txid"
+                              />
                             </div>
-                            <div className="button-row">
+                            <div className="button-row table-buttons">
                               <button
                                 type="button"
                                 className="secondary"
@@ -794,8 +794,8 @@ export function OperatorPanel() {
             ) : depositItems.length === 0 ? (
               <p>No deposits need manual cleanup right now.</p>
             ) : (
-              <div className="operator-table">
-                <table>
+              <div className="operator-table-scroll">
+                <table className="operator-table condensed-table">
                   <thead>
                     <tr>
                       <th>ID</th>
@@ -820,23 +820,28 @@ export function OperatorPanel() {
                               <span className="status-meta">{createdAt}</span>
                             </div>
                           </td>
-                          <td>{dep.state}</td>
+                          <td>
+                            <span className="status-pill compact">{dep.state}</span>
+                          </td>
                           <td>{formatSats(dep.amount_sats)} sats</td>
                           <td className="status-meta code">{dep.address}</td>
-                          <td>{dep.confirmations} / {dep.target_confirmations}</td>
                           <td>
-                            <div className="cleanup-inputs">
-                              <label>
-                                Failure note
-                                <input
-                                  type="text"
-                                  value={depositNotes[dep.id] ?? ''}
-                                  onChange={(e) => handleDepositNoteChange(dep.id, e.target.value)}
-                                  placeholder="optional"
-                                />
-                              </label>
+                            <span className="status-meta">
+                              {dep.confirmations} / {dep.target_confirmations}
+                            </span>
+                          </td>
+                          <td className="actions-cell">
+                            <div className="table-inputs">
+                              <input
+                                type="text"
+                                aria-label="Failure note"
+                                className="table-input"
+                                value={depositNotes[dep.id] ?? ''}
+                                onChange={(e) => handleDepositNoteChange(dep.id, e.target.value)}
+                                placeholder="Failure note"
+                              />
                             </div>
-                            <div className="button-row">
+                            <div className="button-row table-buttons">
                               <button
                                 type="button"
                                 className="secondary"

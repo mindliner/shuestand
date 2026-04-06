@@ -834,6 +834,91 @@ aside h2 {
   margin-top: 0;
 }
 
+.operator-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.operator-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 960px;
+}
+
+.operator-table th,
+.operator-table td {
+  padding: 0.45rem 0.75rem;
+  text-align: left;
+}
+
+.operator-table thead th {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-helper);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.operator-table tbody td {
+  font-size: 0.78rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.operator-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.operator-table tbody tr:hover {
+  background: var(--color-panel-contrast);
+}
+
+.operator-table .status-meta {
+  font-size: 0.7rem;
+  color: var(--color-helper);
+}
+
+.operator-table .status-pill {
+  font-size: 0.65rem;
+  padding: 0.1rem 0.6rem;
+}
+
+.operator-table .compact {
+  white-space: nowrap;
+}
+
+.actions-cell {
+  min-width: 260px;
+}
+
+.table-inputs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.4rem;
+}
+
+.table-inputs .table-input {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--color-text);
+  font-size: 0.75rem;
+  padding: 0.35rem 0.5rem;
+}
+
+.table-inputs .table-input::placeholder {
+  color: var(--color-helper);
+}
+
+.table-buttons {
+  gap: 0.4rem;
+}
+
+.table-buttons button {
+  font-size: 0.72rem;
+  padding: 0.4rem 0.9rem;
+}
+
 .section-heading {
   display: flex;
   align-items: center;

@@ -17,6 +17,7 @@ interface DepositStatusCardProps {
   isLoading: boolean
   hasSubmission: boolean
   pickupToken?: string | null
+  revealedToken?: string | null
   onPickup?: () => void
   pickupPending?: boolean
   pickupError: Error | null
@@ -36,6 +37,7 @@ export function DepositStatusCard({
   isLoading,
   hasSubmission,
   pickupToken,
+  revealedToken,
   onPickup,
   pickupPending = false,
   pickupError,
@@ -99,6 +101,11 @@ export function DepositStatusCard({
     ? getConfirmationEtaText(deposit) ?? 'waiting for final block'
     : null
 
+  const maxStaticQrChars = 900
+  const canRenderStaticPickupQr = Boolean(
+    revealedToken && revealedToken.length <= maxStaticQrChars
+  )
+
   return (
     <div className="status-block">
       <h3>Deposit progress</h3>
@@ -107,12 +114,6 @@ export function DepositStatusCard({
       )}
       <p className="status-meta code">{deposit.id}</p>
       <CopyButton label="Copy deposit ID" text={deposit.id} />
-      {deposit.delivery_hint && (
-        <span className="hint-badge">Delivery: {deposit.delivery_hint}</span>
-      )}
-      {deposit.delivery_error && (
-        <p className="status-error">Delivery error: {deposit.delivery_error}</p>
-      )}
       {bip21 && (
         <div className="qr-card">
           <QRCodeSVG value={bip21} size={132} />
@@ -143,10 +144,28 @@ export function DepositStatusCard({
           {pickupError && (
             <p className="status-error">
               {pickupError instanceof ApiClientError && pickupError.code === 'deposit_not_ready_for_pickup'
-                ? 'Token already revealed for this deposit. Check your clipboard or the delivery target; new reveals are blocked for safety.'
+                ? 'Token already revealed for this deposit. Check your clipboard; new reveals are blocked for safety.'
                 : pickupError.message}
             </p>
           )}
+        </div>
+      )}
+      {revealedToken && (
+        <div className="token-card">
+          <p>Pickup token</p>
+          {canRenderStaticPickupQr ? (
+            <div className="qr-card">
+              <QRCodeSVG value={revealedToken} size={132} />
+            </div>
+          ) : (
+            <p className="status-meta">
+              Token is too large for a reliable static QR code on this display. Use copy instead.
+            </p>
+          )}
+          <CopyButton label="Copy token" text={revealedToken} />
+          <p className="status-meta">
+            We auto-copied to clipboard; this button is a backup if the clipboard is cleared.
+          </p>
         </div>
       )}
       {deposit.txid && (
