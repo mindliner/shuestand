@@ -78,6 +78,23 @@ impl Database {
         })
     }
 
+    pub async fn transaction_counter(&self) -> Result<i64, Error> {
+        let value =
+            sqlx::query_scalar::<_, String>("SELECT value FROM app_settings WHERE key = $1")
+                .bind(TRANSACTION_COUNTER_KEY)
+                .fetch_optional(&self.pool)
+                .await?;
+
+        match value {
+            Some(raw) => raw.trim().parse::<i64>().map_err(|err| {
+                Error::Decode(BoxDynError::from(format!(
+                    "invalid transaction counter value: {err}"
+                )))
+            }),
+            None => Ok(0),
+        }
+    }
+
     pub async fn insert_deposit(&self, deposit: &Deposit) -> Result<(), Error> {
         sqlx::query(
             r#"INSERT INTO deposits

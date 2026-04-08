@@ -9,6 +9,7 @@ use tokio::time::sleep;
 
 use crate::cashu::{token_fingerprint, token_mint_url, token_total_amount};
 use crate::db::{Database, Withdrawal, WithdrawalState};
+use crate::fees::FeeEstimator;
 use crate::onchain::OnchainWallet;
 use crate::operations::OperationMode;
 use crate::telemetry::AppMetrics;
@@ -255,7 +256,7 @@ impl WithdrawalExecutor for CashuRedeemingExecutor {
 pub struct CashuToOnchainExecutor {
     redeemer: Arc<dyn CashuRedeemer>,
     wallet: Arc<OnchainWallet>,
-    payout_fee_rate_vb: f32,
+    fee_estimator: Arc<FeeEstimator>,
     db: Database,
 }
 
@@ -263,13 +264,13 @@ impl CashuToOnchainExecutor {
     pub fn new(
         redeemer: Arc<dyn CashuRedeemer>,
         wallet: Arc<OnchainWallet>,
-        payout_fee_rate_vb: f32,
+        fee_estimator: Arc<FeeEstimator>,
         db: Database,
     ) -> Self {
         Self {
             redeemer,
             wallet,
-            payout_fee_rate_vb: payout_fee_rate_vb.max(0.1),
+            fee_estimator,
             db,
         }
     }
@@ -294,13 +295,10 @@ impl WithdrawalExecutor for CashuToOnchainExecutor {
             redeemed.amount_sats
         };
 
+        let fee_rate = self.fee_estimator.fast_rate().await.max(0.1);
         let txid = self
             .wallet
-            .send_to_address(
-                &withdrawal.delivery_address,
-                amount_sats,
-                self.payout_fee_rate_vb,
-            )
+            .send_to_address(&withdrawal.delivery_address, amount_sats, fee_rate)
             .await?;
 
         Ok(WithdrawalOutcome {

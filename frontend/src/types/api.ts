@@ -179,6 +179,10 @@ export interface CashuSendResponse {
   token: string
 }
 
+export interface TransactionCounterResponse {
+  count: number
+}
+
 export type FloatState = 'ok' | 'low' | 'high' | 'unknown'
 
 export interface WalletFloatStatus {
@@ -209,6 +213,17 @@ export interface PublicConfigResponse {
   deposit_flow_enabled: boolean
   deposit_flow_reason?: string | null
   cashu_mint_url?: string | null
+  fee_estimates: FeeEstimatesResponse
+}
+
+export interface FeeEstimatesResponse {
+  fast: FeeEstimateEntry
+  economy: FeeEstimateEntry
+}
+
+export interface FeeEstimateEntry {
+  sats_per_vb: number
+  updated_at?: string | null
 }
 
 export type OperationMode = 'normal' | 'drain' | 'halt'

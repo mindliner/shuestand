@@ -61,6 +61,7 @@ pub struct AppConfig {
     pub single_request_cap_ratio: f64,
     pub float_alert_webhook_url: Option<String>,
     pub transaction_webhook_url: Option<String>,
+    pub fee_estimator: FeeEstimatorSettings,
 }
 
 impl AppConfig {
@@ -138,6 +139,47 @@ impl AppConfig {
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|v| *v > 0.0)
             .unwrap_or(DEFAULT_WITHDRAWAL_PAYOUT_FEE_RATE_VB);
+
+        let fee_estimator_refresh_interval = Duration::from_secs(
+            std::env::var("FEE_ESTIMATOR_REFRESH_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(60),
+        );
+        let fee_estimator_fast_blocks = std::env::var("FEE_ESTIMATOR_FAST_BLOCKS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(1);
+        let fee_estimator_economy_blocks = std::env::var("FEE_ESTIMATOR_ECONOMY_BLOCKS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(3);
+        let fee_estimator_min_sat_per_vb = std::env::var("FEE_ESTIMATOR_MIN_SAT_PER_VB")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(1.0);
+        let fee_estimator_max_sat_per_vb = std::env::var("FEE_ESTIMATOR_MAX_SAT_PER_VB")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| *v > fee_estimator_min_sat_per_vb)
+            .unwrap_or(500.0);
+
+        let fee_estimator = FeeEstimatorSettings {
+            rpc_url: std::env::var("BITCOIND_RPC_URL").ok(),
+            rpc_user: std::env::var("BITCOIND_RPC_USER").ok(),
+            rpc_password: std::env::var("BITCOIND_RPC_PASSWORD").ok(),
+            refresh_interval: fee_estimator_refresh_interval,
+            fast_target_blocks: fee_estimator_fast_blocks,
+            economy_target_blocks: fee_estimator_economy_blocks,
+            min_sat_per_vb: fee_estimator_min_sat_per_vb,
+            max_sat_per_vb: fee_estimator_max_sat_per_vb,
+            default_fast_sat_per_vb: withdrawal_payout_fee_rate_vb,
+            default_economy_sat_per_vb: withdrawal_payout_fee_rate_vb,
+        };
         let withdrawal_min_sats = std::env::var("WITHDRAWAL_MIN_SATS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -266,8 +308,23 @@ impl AppConfig {
             single_request_cap_ratio,
             float_alert_webhook_url,
             transaction_webhook_url,
+            fee_estimator,
         }
     }
+}
+
+#[derive(Clone)]
+pub struct FeeEstimatorSettings {
+    pub rpc_url: Option<String>,
+    pub rpc_user: Option<String>,
+    pub rpc_password: Option<String>,
+    pub refresh_interval: Duration,
+    pub fast_target_blocks: u32,
+    pub economy_target_blocks: u32,
+    pub min_sat_per_vb: f32,
+    pub max_sat_per_vb: f32,
+    pub default_fast_sat_per_vb: f32,
+    pub default_economy_sat_per_vb: f32,
 }
 
 struct SeedDerivedDescriptors {

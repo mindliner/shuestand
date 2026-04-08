@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::AppState;
 use backend::cashu::{TokenMintError, token_fingerprint, token_mint_url, token_total_amount};
 use backend::db::{Deposit, DepositState, Session, StateLiabilityRow, Withdrawal, WithdrawalState};
+use backend::fees::FeeEstimateSnapshot;
 use backend::onchain::{OnchainBalance, OnchainWallet};
 use backend::operations::OperationMode;
 use backend::wallet::WalletHandle;
@@ -107,6 +108,10 @@ pub fn router(state: AppState) -> Router {
             post(operate_withdrawal),
         )
         .route(
+            "/api/v1/operator/transactions/counter",
+            get(get_transaction_counter),
+        )
+        .route(
             "/api/v1/operator/mode",
             get(get_operation_mode).post(update_operation_mode),
         )
@@ -139,6 +144,7 @@ struct PublicConfigResponse {
     deposit_flow_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cashu_mint_url: Option<String>,
+    fee_estimates: FeeEstimatesPayload,
 }
 
 async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicConfigResponse> {
@@ -160,6 +166,8 @@ async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicCon
         }
     };
 
+    let fee_snapshot = state.fee_estimator.snapshot().await;
+
     let payload = PublicConfigResponse {
         withdrawal_min_sats: state.withdrawal_min_sats,
         deposit_min_sats: state.deposit_min_sats,
@@ -171,6 +179,7 @@ async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicCon
         deposit_flow_enabled,
         deposit_flow_reason,
         cashu_mint_url: state.cashu_mint_url.clone(),
+        fee_estimates: FeeEstimatesPayload::from_snapshot(fee_snapshot),
     };
 
     Ok(Json(ApiResponse { data: payload }))
@@ -461,6 +470,42 @@ struct LedgerSnapshotResponse {
     cashu: CashuLedgerResponse,
     onchain: OnchainLedgerResponse,
     totals: LedgerTotalsResponse,
+}
+
+#[derive(Serialize)]
+struct FeeEstimatesPayload {
+    fast: FeeEstimateEntryPayload,
+    economy: FeeEstimateEntryPayload,
+}
+
+#[derive(Serialize)]
+struct FeeEstimateEntryPayload {
+    sats_per_vb: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+}
+
+impl FeeEstimatesPayload {
+    fn from_snapshot(snapshot: FeeEstimateSnapshot) -> Self {
+        Self {
+            fast: FeeEstimateEntryPayload::from_entry(snapshot.fast),
+            economy: FeeEstimateEntryPayload::from_entry(snapshot.economy),
+        }
+    }
+}
+
+impl FeeEstimateEntryPayload {
+    fn from_entry(entry: backend::fees::FeeEstimateEntry) -> Self {
+        Self {
+            sats_per_vb: entry.sats_per_vb,
+            updated_at: entry.updated_at.map(|ts| ts.to_rfc3339()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct TransactionCounterResponse {
+    count: i64,
 }
 
 #[derive(Serialize)]
@@ -1998,6 +2043,17 @@ async fn get_operation_mode(
     let mode = state.current_operation_mode().await;
     Ok(Json(ApiResponse {
         data: OperationModeResponse { mode },
+    }))
+}
+
+async fn get_transaction_counter(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<TransactionCounterResponse> {
+    require_operator_token(&state, &headers)?;
+    let count = state.db.transaction_counter().await.map_err(server_error)?;
+    Ok(Json(ApiResponse {
+        data: TransactionCounterResponse { count },
     }))
 }
 

@@ -4,6 +4,7 @@ use axum::http::Method;
 use backend::address::{AddressFactory, AddressPool};
 use backend::config::AppConfig;
 use backend::db::{Database, DepositState, WithdrawalState};
+use backend::fees::FeeEstimator;
 use backend::onchain::{BlockchainClient, OnchainWallet, TxStatus};
 use backend::operations::OperationMode;
 use backend::telemetry::AppMetrics;
@@ -130,6 +131,7 @@ struct AppState {
     single_request_cap_ratio: f64,
     session_ttl: ChronoDuration,
     transaction_notifier: Option<Arc<TransactionNotifier>>,
+    fee_estimator: Arc<FeeEstimator>,
 }
 
 impl AppState {
@@ -186,6 +188,32 @@ async fn main() -> Result<(), anyhow::Error> {
     let operation_mode = Arc::new(RwLock::new(initial_operation_mode));
 
     let metrics = Arc::new(AppMetrics::new());
+
+    let fee_estimator = Arc::new(FeeEstimator::new(config.fee_estimator.clone()));
+    if fee_estimator.has_remote() {
+        if let Err(err) = fee_estimator.refresh().await {
+            tracing::warn!(
+                target = "backend",
+                error = %err,
+                "initial fee estimator refresh failed"
+            );
+        }
+
+        let estimator = fee_estimator.clone();
+        let refresh_interval = config.fee_estimator.refresh_interval;
+        tokio::spawn(async move {
+            loop {
+                if let Err(err) = estimator.refresh().await {
+                    tracing::warn!(
+                        target = "backend",
+                        error = %err,
+                        "fee estimator refresh failed"
+                    );
+                }
+                sleep(refresh_interval).await;
+            }
+        });
+    }
     let float_status = Arc::new(RwLock::new(FloatStatus::default()));
 
     let address_factory =
@@ -442,7 +470,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 Arc::new(CashuToOnchainExecutor::new(
                     redeemer,
                     onchain_wallet,
-                    config.withdrawal_payout_fee_rate_vb,
+                    fee_estimator.clone(),
                     db.clone(),
                 ))
             } else if let (Some(manager), Some(swapper)) =
@@ -567,6 +595,7 @@ async fn main() -> Result<(), anyhow::Error> {
         single_request_cap_ratio: config.single_request_cap_ratio,
         session_ttl: ChronoDuration::hours(DEFAULT_SESSION_TTL_HOURS),
         transaction_notifier: transaction_notifier.clone(),
+        fee_estimator: fee_estimator.clone(),
     };
 
     let app = http::router(state).layer(cors);

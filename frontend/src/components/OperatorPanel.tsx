@@ -18,9 +18,11 @@ import {
   operateDeposit,
   getOperationMode,
   setOperationMode,
+  getTransactionCounter,
+  getPublicConfig,
 } from '../lib/api'
 import { CopyButton } from './KioskStatusCards'
-import type { FloatStatusResponse, OperatorWithdrawalActionRequest, OperatorDepositActionRequest, Withdrawal, Deposit, OperationMode } from '../types/api'
+import type { FloatStatusResponse, OperatorWithdrawalActionRequest, OperatorDepositActionRequest, Withdrawal, Deposit, OperationMode, FeeEstimateEntry } from '../types/api'
 
 const formatTokenSnippet = (token: string) => {
   if (token.length <= 120) {
@@ -105,6 +107,7 @@ export function OperatorPanel() {
     amount: '',
     feeRate: '2',
   })
+  const [payoutFeeMode, setPayoutFeeMode] = useState<'fast' | 'economy' | 'custom'>('fast')
   const [topupAmount, setTopupAmount] = useState('')
   const [invoiceAmount, setInvoiceAmount] = useState('50000')
   const [invoiceBolt12, setInvoiceBolt12] = useState(false)
@@ -167,12 +170,23 @@ export function OperatorPanel() {
   })
 
   const sendMutation = useMutation({
-    mutationFn: () =>
-      sendWalletPayment(token, {
+    mutationFn: () => {
+      const manual = Number(payoutForm.feeRate)
+      const resolvedFee =
+        payoutFeeMode === 'fast' && feeEstimates
+          ? feeEstimates.fast.sats_per_vb
+          : payoutFeeMode === 'economy' && feeEstimates
+            ? feeEstimates.economy.sats_per_vb
+            : manual
+
+      const fee_rate_vb = resolvedFee > 0 ? resolvedFee : 0.1
+
+      return sendWalletPayment(token, {
         address: payoutForm.address.trim(),
         amount_sats: Number(payoutForm.amount),
-        fee_rate_vb: Number(payoutForm.feeRate),
-      }),
+        fee_rate_vb,
+      })
+    },
     onSuccess: (res) => {
       setFeedback(`Broadcasted tx ${res.txid}`)
       setPayoutForm((prev) => ({ ...prev, amount: '' }))
@@ -204,6 +218,33 @@ export function OperatorPanel() {
     },
   })
 
+  const transactionCounterQuery = useQuery({
+    queryKey: ['transaction-counter', token],
+    queryFn: () => getTransactionCounter(token),
+    enabled: Boolean(token),
+    refetchInterval: token ? 60000 : false,
+  })
+
+  const publicConfigQuery = useQuery({
+    queryKey: ['public-config'],
+    queryFn: getPublicConfig,
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const feeEstimates = publicConfigQuery.data?.fee_estimates ?? null
+  const formatFeeValue = (entry?: FeeEstimateEntry | null, fallback?: string) => {
+    if (!entry) {
+      return fallback ?? '—'
+    }
+    return `${entry.sats_per_vb.toFixed(1)} sat/vB`
+  }
+  const formatUpdatedTime = (entry?: FeeEstimateEntry | null) => {
+    if (!entry?.updated_at) {
+      return '—'
+    }
+    return new Date(entry.updated_at).toLocaleTimeString()
+  }
+
   const invoice = invoiceQuery.data
 
   useEffect(() => {
@@ -214,6 +255,12 @@ export function OperatorPanel() {
       queryClient.invalidateQueries({ queryKey: ['cashu-balance', token] })
     }
   }, [invoice, token, queryClient])
+
+  useEffect(() => {
+    if (!feeEstimates && payoutFeeMode !== 'custom') {
+      setPayoutFeeMode('custom')
+    }
+  }, [feeEstimates, payoutFeeMode])
 
   const cashuSendMutation = useMutation({
     mutationFn: (amount: number) => sendCashuToken(token, { amount_sats: amount }),
@@ -612,7 +659,9 @@ export function OperatorPanel() {
 
           <section className="operator-card">
             <div className="operator-card-header">
-              <h3>Activity log</h3>
+              <div className="operator-card-title">
+                <h3>Activity log</h3>
+              </div>
               <label className="checkbox-row">
                 <input
                   type="checkbox"
@@ -658,6 +707,12 @@ export function OperatorPanel() {
                   </li>
                 ))}
               </ul>
+            )}
+            {typeof transactionCounterQuery.data?.count === 'number' && (
+              <p className="operator-card-footnote">
+                {transactionCounterQuery.data.count.toLocaleString('en-US')} transaction
+                {transactionCounterQuery.data.count === 1 ? '' : 's'} completed
+              </p>
             )}
           </section>
 
@@ -1016,22 +1071,85 @@ export function OperatorPanel() {
                       required
                     />
                   </label>
-                  <label>
-                    Fee rate (sat/vB)
-                    <input
-                      type="number"
-                      min={1}
-                      step={0.1}
-                      value={payoutForm.feeRate}
-                      onChange={(e) =>
-                        setPayoutForm((prev) => ({
-                          ...prev,
-                          feeRate: e.target.value,
-                        }))
-                      }
-                      required
-                    />
-                  </label>
+                  <div className="fee-mode-section">
+                    <span className="helper">Fee preference</span>
+                    <div className="fee-mode-options">
+                      <label className={`fee-mode-option ${!feeEstimates ? 'disabled' : ''}`}>
+                        <input
+                          type="radio"
+                          name="onchain-fee-mode"
+                          value="fast"
+                          disabled={!feeEstimates}
+                          checked={Boolean(feeEstimates) && payoutFeeMode === 'fast'}
+                          onChange={() => setPayoutFeeMode('fast')}
+                        />
+                        <div>
+                          <strong>Fast (next block)</strong>
+                          <span className="fee-mode-rate">{formatFeeValue(feeEstimates?.fast, '…')}</span>
+                        </div>
+                      </label>
+                      <label className={`fee-mode-option ${!feeEstimates ? 'disabled' : ''}`}>
+                        <input
+                          type="radio"
+                          name="onchain-fee-mode"
+                          value="economy"
+                          disabled={!feeEstimates}
+                          checked={Boolean(feeEstimates) && payoutFeeMode === 'economy'}
+                          onChange={() => setPayoutFeeMode('economy')}
+                        />
+                        <div>
+                          <strong>Economy (≈3 blocks)</strong>
+                          <span className="fee-mode-rate">{formatFeeValue(feeEstimates?.economy, '…')}</span>
+                        </div>
+                      </label>
+                      <label className="fee-mode-option">
+                        <input
+                          type="radio"
+                          name="onchain-fee-mode"
+                          value="custom"
+                          checked={!feeEstimates || payoutFeeMode === 'custom'}
+                          onChange={() => setPayoutFeeMode('custom')}
+                        />
+                        <div>
+                          <strong>Custom</strong>
+                          <span className="fee-mode-rate">Enter manually</span>
+                        </div>
+                      </label>
+                    </div>
+                    {feeEstimates && (
+                      <p className="status-meta">
+                        Fast updated {formatUpdatedTime(feeEstimates.fast)} · Economy {formatUpdatedTime(feeEstimates.economy)}
+                      </p>
+                    )}
+                  </div>
+                  {payoutFeeMode === 'custom' || !feeEstimates ? (
+                    <label>
+                      Fee rate (sat/vB)
+                      <input
+                        type="number"
+                        min={0.1}
+                        step={0.1}
+                        value={payoutForm.feeRate}
+                        onChange={(e) =>
+                          setPayoutForm((prev) => ({
+                            ...prev,
+                            feeRate: e.target.value,
+                          }))
+                        }
+                        required
+                      />
+                      <span className="helper">Enter a custom fee rate</span>
+                    </label>
+                  ) : (
+                    <p className="helper">
+                      Using {payoutFeeMode === 'fast' ? 'fast' : 'economy'} estimate
+                      {' '}
+                      ({formatFeeValue(
+                        payoutFeeMode === 'fast' ? feeEstimates?.fast : feeEstimates?.economy,
+                        '—',
+                      )}).
+                    </p>
+                  )}
                   <button type="submit" disabled={!canSendOnchain || sendMutation.isPending}>
                     {sendMutation.isPending ? 'Broadcasting…' : 'Send payout'}
                   </button>

@@ -2,6 +2,7 @@ pub mod address;
 pub mod cashu;
 pub mod config;
 pub mod db;
+pub mod fees;
 pub mod onchain;
 pub mod operations;
 pub mod telemetry;

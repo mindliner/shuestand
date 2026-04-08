@@ -674,6 +674,12 @@ aside h2 {
   margin-top: 0;
 }
 
+.operator-card-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .operator-card-header {
   display: flex;
   justify-content: space-between;
@@ -696,6 +702,46 @@ aside h2 {
   background: transparent;
   border: 1px solid var(--color-operator-border);
   color: var(--color-text);
+}
+
+.operator-card-footnote {
+  margin-top: 1rem;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--color-helper);
+}
+
+.fee-mode-section {
+  margin: 1rem 0;
+}
+
+.fee-mode-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.fee-mode-option {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 0.35rem 0.65rem;
+}
+
+.fee-mode-option input {
+  margin: 0;
+}
+
+.fee-mode-option.disabled {
+  opacity: 0.5;
+}
+
+.fee-mode-rate {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--color-helper);
 }
 
 .balance-grid {
@@ -952,6 +998,11 @@ aside h2 {
 .status-pill.unknown {
   border-color: rgba(255, 255, 255, 0.3);
   color: rgba(255, 255, 255, 0.6);
+}
+
+.status-pill.subtle {
+  border-color: var(--color-border);
+  color: var(--color-helper);
 }
 
 .status-warning {
