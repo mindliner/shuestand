@@ -49,6 +49,7 @@ pub struct AppConfig {
     pub deposit_worker_enabled: bool,
     pub deposit_worker_max_attempts: u32,
     pub cashu_mint_url: Option<String>,
+    pub public_base_url: Option<String>,
     pub cashu_wallet_dir: Option<PathBuf>,
     pub wallet_api_token: Option<String>,
     pub float_target_sats: u64,
@@ -213,6 +214,10 @@ impl AppConfig {
             .unwrap_or(DEFAULT_DEPOSIT_WORKER_MAX_ATTEMPTS);
 
         let cashu_mint_url = std::env::var("CASHU_MINT_URL").ok();
+        let public_base_url = std::env::var("PUBLIC_BASE_URL")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty());
         let cashu_wallet_dir = std::env::var("CASHU_WALLET_DIR").ok().map(PathBuf::from);
         let wallet_api_token = std::env::var("WALLET_API_TOKEN").ok();
 
@@ -296,6 +301,7 @@ impl AppConfig {
             deposit_worker_enabled,
             deposit_worker_max_attempts,
             cashu_mint_url,
+            public_base_url,
             cashu_wallet_dir,
             wallet_api_token,
             float_target_sats,

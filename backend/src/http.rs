@@ -1009,10 +1009,11 @@ async fn request_withdrawal(
             Some(mint) => mint.to_string(),
             None => return Err(unavailable("cashu mint not configured")),
         };
-        let base_url = match infer_base_url(&headers) {
-            Some(url) => url,
-            None => return Err(invalid_request("missing Host header")),
-        };
+        let base_url = state
+            .public_base_url
+            .clone()
+            .or_else(|| infer_base_url(&headers))
+            .ok_or_else(|| invalid_request("missing Host header"))?;
         let payment_request_id = format!("pr_{}", Uuid::new_v4());
         let transport_target = format!(
             "{}/api/v1/withdrawals/{}/nut18",
