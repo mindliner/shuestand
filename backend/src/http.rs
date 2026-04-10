@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{AUTHORIZATION, CONTENT_TYPE, HOST},
+        header::{AUTHORIZATION, CONTENT_TYPE},
     },
     response::IntoResponse,
     routing::{get, post},
@@ -1012,8 +1012,7 @@ async fn request_withdrawal(
         let base_url = state
             .public_base_url
             .clone()
-            .or_else(|| infer_base_url(&headers))
-            .ok_or_else(|| invalid_request("missing Host header"))?;
+            .ok_or_else(|| unavailable("PUBLIC_BASE_URL not configured"))?;
         let payment_request_id = format!("pr_{}", Uuid::new_v4());
         let transport_target = format!(
             "{}/api/v1/withdrawals/{}/nut18",
@@ -2127,19 +2126,6 @@ fn sum_withdrawal_states(
         }
     }
     bucket
-}
-
-fn infer_base_url(headers: &HeaderMap) -> Option<String> {
-    let host = headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get(HOST))?
-        .to_str()
-        .ok()?;
-    let proto = headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("http");
-    Some(format!("{}://{}", proto, host))
 }
 
 fn wallet_guard(
