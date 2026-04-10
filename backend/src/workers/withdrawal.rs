@@ -16,6 +16,7 @@ use crate::fees::FeeEstimator;
 use crate::onchain::OnchainWallet;
 use crate::operations::OperationMode;
 use crate::telemetry::AppMetrics;
+use crate::transactions::TransactionNotifier;
 use crate::wallet::{MintSwapService, MultiMintWalletManager, WalletHandle};
 
 pub struct WithdrawalWorker {
@@ -25,6 +26,7 @@ pub struct WithdrawalWorker {
     max_attempts: u32,
     metrics: Arc<AppMetrics>,
     operation_mode: Arc<RwLock<OperationMode>>,
+    transaction_notifier: Option<Arc<TransactionNotifier>>,
 }
 
 impl WithdrawalWorker {
@@ -35,6 +37,7 @@ impl WithdrawalWorker {
         max_attempts: u32,
         metrics: Arc<AppMetrics>,
         operation_mode: Arc<RwLock<OperationMode>>,
+        transaction_notifier: Option<Arc<TransactionNotifier>>,
     ) -> Self {
         Self {
             db,
@@ -43,6 +46,7 @@ impl WithdrawalWorker {
             max_attempts: max_attempts.max(1),
             metrics,
             operation_mode,
+            transaction_notifier,
         }
     }
 
@@ -97,6 +101,11 @@ impl WithdrawalWorker {
                             None,
                         )
                         .await?;
+                    if outcome.next_state == WithdrawalState::Settled {
+                        if let Some(notifier) = self.transaction_notifier.as_ref() {
+                            notifier.record_withdrawal(&withdrawal.id).await;
+                        }
+                    }
                 }
                 Err(err) => {
                     self.metrics.inc_withdrawal_failure();

@@ -506,6 +506,7 @@ async fn main() -> Result<(), anyhow::Error> {
             config.withdrawal_worker_max_attempts,
             metrics.clone(),
             operation_mode.clone(),
+            transaction_notifier.clone(),
         );
         tokio::spawn(async move {
             worker.run().await;
