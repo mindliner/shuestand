@@ -905,7 +905,7 @@ impl Database {
 
     pub async fn reserved_onchain_withdrawal_sats(&self) -> Result<u64, Error> {
         let total = sqlx::query_scalar::<_, i64>(
-            r#"SELECT COALESCE(SUM(COALESCE(token_value_sats, requested_amount_sats, 0)), 0)
+            r#"SELECT COALESCE(SUM(COALESCE(token_value_sats, requested_amount_sats, 0)), 0)::BIGINT
                FROM withdrawals
                WHERE state IN ('queued', 'broadcasting', 'confirming')"#,
         )
@@ -917,7 +917,7 @@ impl Database {
 
     pub async fn reserved_cashu_deposit_sats(&self) -> Result<u64, Error> {
         let total = sqlx::query_scalar::<_, i64>(
-            r#"SELECT COALESCE(SUM(amount_sats), 0)
+            r#"SELECT COALESCE(SUM(amount_sats), 0)::BIGINT
                FROM deposits
                WHERE state IN ('confirming', 'minting', 'delivering', 'ready')"#,
         )
