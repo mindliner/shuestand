@@ -915,6 +915,18 @@ impl Database {
         Ok(total.max(0) as u64)
     }
 
+    pub async fn reserved_cashu_deposit_sats(&self) -> Result<u64, Error> {
+        let total = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COALESCE(SUM(amount_sats), 0)
+               FROM deposits
+               WHERE state IN ('confirming', 'minting', 'delivering', 'ready')"#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(total.max(0) as u64)
+    }
+
     pub async fn create_session(&self, session: &Session) -> Result<(), Error> {
         sqlx::query(
             r#"INSERT INTO sessions (id, token_hash, created_at, last_seen_at, expires_at) VALUES ($1, $2, $3, $4, $5)"#,

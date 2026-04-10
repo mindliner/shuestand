@@ -763,8 +763,14 @@ async fn create_deposit(
         let guard = cashu_wallet.lock().await;
         guard.total_balance().await.map_err(server_error)?.to_u64()
     };
+    let reserved_cashu = state
+        .db
+        .reserved_cashu_deposit_sats()
+        .await
+        .map_err(server_error)?;
+    let effective_spendable = spendable.saturating_sub(reserved_cashu);
     let ratio = state.single_request_cap_ratio;
-    let deposit_cap = ((spendable as f64) * ratio).floor() as u64;
+    let deposit_cap = ((effective_spendable as f64) * ratio).floor() as u64;
     if deposit_cap == 0 {
         return Err(unavailable(
             "cashu float is depleted; please contact the operator",
@@ -774,6 +780,8 @@ async fn create_deposit(
         tracing::warn!(
             target: "backend",
             spendable,
+            reserved_cashu,
+            effective_spendable,
             deposit_cap,
             withdrawal_min = state.withdrawal_min_sats,
             "deposit flow disabled because cap is below the withdrawal minimum"
@@ -785,6 +793,8 @@ async fn create_deposit(
             target: "backend",
             requested = req.amount_sats,
             spendable,
+            reserved_cashu,
+            effective_spendable,
             deposit_cap,
             "deposit request exceeds cashu float cap"
         );
