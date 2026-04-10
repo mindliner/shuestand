@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,8 +7,9 @@ use anyhow::{Context, anyhow};
 use cdk::Amount;
 use cdk::amount::SplitTarget;
 use cdk::nuts::nut00::KnownMethod;
+use cdk::nuts::Token;
 use cdk::nuts::{PaymentMethod, ProofsMethods, State};
-use cdk::wallet::{MeltQuote, ReceiveOptions};
+use cdk::wallet::{KeysetFilter, MeltQuote, ReceiveOptions};
 use thiserror::Error;
 use tokio::time::sleep;
 
@@ -207,11 +209,7 @@ impl MintSwapService {
         token_raw: &str,
         expected_amount: Option<u64>,
     ) -> anyhow::Result<u64> {
-        let receive_result = wallet
-            .lock()
-            .await
-            .receive(token_raw, ReceiveOptions::default())
-            .await;
+        let receive_result = receive_with_all_keysets(wallet, token_raw).await;
 
         match receive_result {
             Ok(amount) => Ok(amount.to_u64()),
@@ -321,4 +319,22 @@ impl MintSwapService {
             .to_u64();
         Ok((total, fee))
     }
+}
+
+async fn receive_with_all_keysets(
+    wallet: &WalletHandle,
+    token_raw: &str,
+) -> Result<cdk::Amount, cdk::Error> {
+    let token = Token::from_str(token_raw)?;
+    let guard = wallet.lock().await;
+    let keysets = guard.get_mint_keysets(KeysetFilter::All).await?;
+    let proofs = token.proofs(&keysets)?;
+    guard
+        .receive_proofs(
+            proofs,
+            ReceiveOptions::default(),
+            token.memo().clone(),
+            Some(token_raw.to_string()),
+        )
+        .await
 }

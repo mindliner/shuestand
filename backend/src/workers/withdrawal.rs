@@ -1,8 +1,11 @@
 use std::sync::Arc;
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use cdk::nuts::Token;
+use cdk::wallet::KeysetFilter;
 use cdk::wallet::ReceiveOptions;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
@@ -13,7 +16,7 @@ use crate::fees::FeeEstimator;
 use crate::onchain::OnchainWallet;
 use crate::operations::OperationMode;
 use crate::telemetry::AppMetrics;
-use crate::wallet::{MintSwapService, MultiMintWalletManager};
+use crate::wallet::{MintSwapService, MultiMintWalletManager, WalletHandle};
 
 pub struct WithdrawalWorker {
     db: Database,
@@ -174,12 +177,7 @@ impl CashuRedeemer for CdkCashuRedeemer {
 
         if mint_url == self.wallets.canonical_mint() {
             let wallet = self.wallets.wallet_for_mint(&mint_url).await?;
-            match wallet
-                .lock()
-                .await
-                .receive(encoded_token, ReceiveOptions::default())
-                .await
-            {
+            match receive_with_all_keysets(&wallet, encoded_token).await {
                 Ok(amount) => {
                     return Ok(CashuRedeemResult {
                         amount_sats: amount.to_u64(),
@@ -219,6 +217,24 @@ impl CashuRedeemer for CdkCashuRedeemer {
             swap_fee_sats: Some(fee),
         })
     }
+}
+
+async fn receive_with_all_keysets(
+    wallet: &WalletHandle,
+    encoded_token: &str,
+) -> Result<cdk::Amount, cdk::Error> {
+    let token = Token::from_str(encoded_token)?;
+    let guard = wallet.lock().await;
+    let keysets = guard.get_mint_keysets(KeysetFilter::All).await?;
+    let proofs = token.proofs(&keysets)?;
+    guard
+        .receive_proofs(
+            proofs,
+            ReceiveOptions::default(),
+            token.memo().clone(),
+            Some(encoded_token.to_string()),
+        )
+        .await
 }
 
 pub struct CashuRedeemingExecutor {
