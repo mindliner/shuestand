@@ -648,9 +648,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cashu"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26b4ad04070fb67914feb2641e7b54001000f1f7f67a7c39a08f32edf01fd3ae"
+version = "0.16.0-rc.1"
 dependencies = [
  "bitcoin 0.32.8",
  "cbor-diag",
@@ -715,9 +713,7 @@ dependencies = [
 
 [[package]]
 name = "cdk"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6536eb1df7a497cb334edf6bb9eea1fa8e4a9b08c79fe45c40d43413ecb88c8"
+version = "0.16.0-rc.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -754,9 +750,7 @@ dependencies = [
 
 [[package]]
 name = "cdk-common"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a371d218ffe83dcabd202278251af53744b8fa3e846124ddcd34247c4e38bdc3"
+version = "0.16.0-rc.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -767,7 +761,6 @@ dependencies = [
  "ciborium",
  "futures",
  "getrandom 0.2.17",
- "jsonwebtoken",
  "lightning",
  "lightning-invoice",
  "parking_lot",
@@ -788,9 +781,7 @@ dependencies = [
 
 [[package]]
 name = "cdk-http-client"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf194792d45975b360911417d3713e4d3f0142e18b082e2a8c2c88a91630b43d"
+version = "0.16.0-rc.1"
 dependencies = [
  "futures",
  "futures-channel",
@@ -810,9 +801,7 @@ dependencies = [
 
 [[package]]
 name = "cdk-signatory"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f40745c9402049bbba47ae52e1fc7552d4af8e99572fd73697448f51bbb3a02"
+version = "0.16.0-rc.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -836,9 +825,7 @@ dependencies = [
 
 [[package]]
 name = "cdk-sql-common"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36e920cffaa36f396d16727649b05d6dc8d42aecc4108fa955876515149bdb0e"
+version = "0.16.0-rc.1"
 dependencies = [
  "async-trait",
  "bitcoin 0.32.8",
@@ -855,9 +842,7 @@ dependencies = [
 
 [[package]]
 name = "cdk-sqlite"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c706b86b76d89bbbfad7e106328c14f1d99440ee5829840510e50922f48fdc51"
+version = "0.16.0-rc.1"
 dependencies = [
  "async-trait",
  "bitcoin 0.32.8",
