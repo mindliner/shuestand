@@ -903,6 +903,18 @@ impl Database {
             .collect()
     }
 
+    pub async fn reserved_onchain_withdrawal_sats(&self) -> Result<u64, Error> {
+        let total = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COALESCE(SUM(COALESCE(token_value_sats, requested_amount_sats, 0)), 0)
+               FROM withdrawals
+               WHERE state IN ('queued', 'broadcasting', 'confirming')"#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(total.max(0) as u64)
+    }
+
     pub async fn create_session(&self, session: &Session) -> Result<(), Error> {
         sqlx::query(
             r#"INSERT INTO sessions (id, token_hash, created_at, last_seen_at, expires_at) VALUES ($1, $2, $3, $4, $5)"#,

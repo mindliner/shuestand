@@ -943,13 +943,19 @@ async fn request_withdrawal(
 
     let session = resolve_session_from_headers(&state, &headers).await?;
 
-    let available_onchain = match state.onchain_wallet.as_ref() {
+    let raw_onchain = match state.onchain_wallet.as_ref() {
         Some(wallet) => {
             let summary = wallet.balance().await.map_err(server_error)?;
             summary.confirmed + summary.trusted_pending
         }
         None => return Err(unavailable("on-chain wallet not configured")),
     };
+    let reserved_onchain = state
+        .db
+        .reserved_onchain_withdrawal_sats()
+        .await
+        .map_err(server_error)?;
+    let available_onchain = raw_onchain.saturating_sub(reserved_onchain);
     let ratio = state.single_request_cap_ratio;
     let withdrawal_cap = ((available_onchain as f64) * ratio).floor() as u64;
     if withdrawal_cap == 0 {
@@ -961,6 +967,8 @@ async fn request_withdrawal(
         tracing::warn!(
             target: "backend",
             requested = req.amount_sats,
+            raw_onchain,
+            reserved_onchain,
             available_onchain,
             withdrawal_cap,
             "withdrawal request exceeds on-chain float cap"
@@ -1280,6 +1288,37 @@ async fn submit_payment_request(
         .value()
         .map_err(|_| invalid_request("token references multiple mints"))?
         .to_u64();
+
+    let raw_onchain = match state.onchain_wallet.as_ref() {
+        Some(wallet) => {
+            let summary = wallet.balance().await.map_err(server_error)?;
+            summary.confirmed + summary.trusted_pending
+        }
+        None => return Err(unavailable("on-chain wallet not configured")),
+    };
+    let reserved_onchain = state
+        .db
+        .reserved_onchain_withdrawal_sats()
+        .await
+        .map_err(server_error)?;
+    let available_onchain = raw_onchain.saturating_sub(reserved_onchain);
+    let withdrawal_cap = ((available_onchain as f64) * state.single_request_cap_ratio).floor() as u64;
+    if withdrawal_cap == 0 || amount > withdrawal_cap {
+        tracing::warn!(
+            target: "backend",
+            withdrawal_id = %withdrawal.id,
+            amount_sats = amount,
+            raw_onchain,
+            reserved_onchain,
+            available_onchain,
+            withdrawal_cap,
+            "rejecting payment request callback due to on-chain reservation pressure"
+        );
+        return Err(unavailable(
+            "on-chain payout capacity is currently exhausted; try again shortly",
+        ));
+    }
+
     if let Some(expected) = withdrawal.requested_amount_sats {
         if amount < expected {
             tracing::warn!(
