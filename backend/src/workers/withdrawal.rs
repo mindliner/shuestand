@@ -302,7 +302,7 @@ impl WithdrawalExecutor for CashuToOnchainExecutor {
             .await?;
 
         Ok(WithdrawalOutcome {
-            next_state: WithdrawalState::Confirming,
+            next_state: WithdrawalState::Settled,
             token_value_sats: Some(amount_sats),
             txid: Some(txid),
         })
@@ -322,7 +322,7 @@ impl WithdrawalExecutor for MockWithdrawalExecutor {
                 .unwrap_or(100)
         });
         Ok(WithdrawalOutcome {
-            next_state: WithdrawalState::Confirming,
+            next_state: WithdrawalState::Settled,
             token_value_sats: Some(inferred_amount),
             txid: Some(format!("mock-tx-{}", withdrawal.id)),
         })
