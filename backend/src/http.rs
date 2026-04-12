@@ -15,7 +15,13 @@ use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::{borrow::ToOwned, fs, sync::Arc, time::Instant};
+use std::{
+    borrow::ToOwned,
+    collections::HashMap,
+    fs,
+    sync::{Arc, Mutex, OnceLock},
+    time::Instant,
+};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -63,6 +69,13 @@ const CASHU_WALLET_UNAVAILABLE_MESSAGE: &str =
     "Cashu wallet unavailable; please contact the operator";
 const CASHU_FLOAT_DEPLETED_MESSAGE: &str = "Cashu float is depleted; please contact the operator";
 const DEPOSIT_FLOAT_TOO_LOW_MESSAGE: &str = "Float too low, please contact operator";
+const SUSPICIOUS_TOKEN_RATIO_THRESHOLD: f64 = 1.5;
+const WITHDRAWAL_BURST_WINDOW_SECS: i64 = 60;
+const WITHDRAWAL_BURST_THRESHOLD: usize = 4;
+const OPERATOR_401_WINDOW_SECS: i64 = 60;
+const OPERATOR_401_THRESHOLD: usize = 20;
+
+static SECURITY_WINDOW_BUCKETS: OnceLock<Mutex<HashMap<String, Vec<i64>>>> = OnceLock::new();
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -805,6 +818,31 @@ async fn create_deposit(
     }
 
     let session = resolve_session_from_headers(&state, &headers).await?;
+    let client_hint = request_client_hint(&headers);
+    let session_hint = session
+        .as_ref()
+        .map(|s| s.id.clone())
+        .unwrap_or_else(|| "none".to_string());
+    if let Some(count) = detect_burst(
+        "deposit",
+        &format!("{}:{}", client_hint, session_hint),
+        WITHDRAWAL_BURST_WINDOW_SECS,
+        WITHDRAWAL_BURST_THRESHOLD,
+    ) {
+        emit_security_alert(
+            &state,
+            "deposit_burst_detected",
+            json!({
+                "count": count,
+                "window_seconds": WITHDRAWAL_BURST_WINDOW_SECS,
+                "threshold": WITHDRAWAL_BURST_THRESHOLD,
+                "client": client_hint,
+                "session_id": session.as_ref().map(|s| s.id.clone()),
+                "delivery_hint": req.delivery_hint,
+                "requested_amount_sats": req.amount_sats,
+            }),
+        );
+    }
 
     let id = format!("dep_{}", Uuid::new_v4());
     let assigned = state
@@ -952,6 +990,31 @@ async fn request_withdrawal(
     }
 
     let session = resolve_session_from_headers(&state, &headers).await?;
+    let client_hint = request_client_hint(&headers);
+    let session_hint = session
+        .as_ref()
+        .map(|s| s.id.clone())
+        .unwrap_or_else(|| "none".to_string());
+    if let Some(count) = detect_burst(
+        "withdrawal",
+        &format!("{}:{}", client_hint, session_hint),
+        WITHDRAWAL_BURST_WINDOW_SECS,
+        WITHDRAWAL_BURST_THRESHOLD,
+    ) {
+        emit_security_alert(
+            &state,
+            "withdrawal_burst_detected",
+            json!({
+                "count": count,
+                "window_seconds": WITHDRAWAL_BURST_WINDOW_SECS,
+                "threshold": WITHDRAWAL_BURST_THRESHOLD,
+                "client": client_hint,
+                "session_id": session.as_ref().map(|s| s.id.clone()),
+                "delivery_address": req.delivery_address,
+                "requested_amount_sats": req.amount_sats,
+            }),
+        );
+    }
 
     let raw_onchain = match state.onchain_wallet.as_ref() {
         Some(wallet) => {
@@ -1021,6 +1084,22 @@ async fn request_withdrawal(
         if token_amount < req.amount_sats {
             return Err(invalid_request("token value is below requested amount"));
         }
+        let ratio = (token_amount as f64) / (req.amount_sats as f64);
+        if ratio >= SUSPICIOUS_TOKEN_RATIO_THRESHOLD {
+            emit_security_alert(
+                &state,
+                "withdrawal_token_ratio_anomaly",
+                json!({
+                    "requested_amount_sats": req.amount_sats,
+                    "token_amount_sats": token_amount,
+                    "ratio": ratio,
+                    "delivery_address": withdrawal.delivery_address,
+                    "mint": mint_url,
+                    "session_id": withdrawal.session_id,
+                    "client": request_client_hint(&headers),
+                }),
+            );
+        }
         Some(mint_url)
     } else {
         let canonical_mint = match state.cashu_mint_url.as_deref() {
@@ -1070,6 +1149,59 @@ async fn request_withdrawal(
     Ok(Json(ApiResponse {
         data: WithdrawalView::new(withdrawal, state.cashu_mint_url.as_deref(), known_mint),
     }))
+}
+
+fn request_client_hint(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| headers.get("x-real-ip").and_then(|v| v.to_str().ok()))
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn detect_burst(scope: &str, key: &str, window_secs: i64, threshold: usize) -> Option<usize> {
+    let now = Utc::now().timestamp();
+    let lower = now.saturating_sub(window_secs);
+    let storage = SECURITY_WINDOW_BUCKETS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = storage.lock().expect("security bucket mutex poisoned");
+    let bucket_key = format!("{scope}:{key}");
+    let entries = guard.entry(bucket_key).or_default();
+    entries.retain(|ts| *ts >= lower);
+    entries.push(now);
+    let count = entries.len();
+    if count == threshold {
+        Some(count)
+    } else {
+        None
+    }
+}
+
+fn emit_security_alert(state: &AppState, kind: &'static str, payload: serde_json::Value) {
+    let Some(url) = state.security_alert_webhook_url.clone() else {
+        return;
+    };
+    tokio::spawn(async move {
+        let body = json!({
+            "event": "security_alert",
+            "kind": kind,
+            "timestamp": Utc::now().to_rfc3339(),
+            "payload": payload,
+        });
+        match reqwest::Client::new().post(&url).json(&body).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::warn!(target: "backend", kind, status = %resp.status(), "security webhook delivered");
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(target: "backend", kind, %status, response = %body, "security webhook returned non-success");
+            }
+            Err(err) => {
+                tracing::warn!(target: "backend", kind, error = %err, "security webhook delivery failed");
+            }
+        }
+    });
 }
 
 async fn get_withdrawal(
@@ -2213,6 +2345,24 @@ fn require_operator_token(
         .and_then(|raw| raw.strip_prefix("Bearer "))
         .unwrap_or("");
     if provided != token {
+        let client_hint = request_client_hint(headers);
+        if let Some(count) = detect_burst(
+            "operator401",
+            &client_hint,
+            OPERATOR_401_WINDOW_SECS,
+            OPERATOR_401_THRESHOLD,
+        ) {
+            emit_security_alert(
+                state,
+                "operator_auth_401_burst",
+                json!({
+                    "count": count,
+                    "window_seconds": OPERATOR_401_WINDOW_SECS,
+                    "threshold": OPERATOR_401_THRESHOLD,
+                    "client": client_hint,
+                }),
+            );
+        }
         return Err(unauthorized());
     }
     Ok(())

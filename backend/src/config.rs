@@ -62,6 +62,7 @@ pub struct AppConfig {
     pub single_request_cap_ratio: f64,
     pub float_alert_webhook_url: Option<String>,
     pub transaction_webhook_url: Option<String>,
+    pub security_alert_webhook_url: Option<String>,
     pub fee_estimator: FeeEstimatorSettings,
 }
 
@@ -255,6 +256,7 @@ impl AppConfig {
             .unwrap_or(DEFAULT_SINGLE_REQUEST_RATIO);
         let float_alert_webhook_url = std::env::var("FLOAT_ALERT_WEBHOOK_URL").ok();
         let transaction_webhook_url = std::env::var("TRANSACTION_WEBHOOK_URL").ok();
+        let security_alert_webhook_url = std::env::var("SECURITY_ALERT_WEBHOOK_URL").ok();
 
         if bitcoin_wallet_seed.is_some()
             && (bitcoin_descriptor.is_none()
@@ -314,6 +316,7 @@ impl AppConfig {
             single_request_cap_ratio,
             float_alert_webhook_url,
             transaction_webhook_url,
+            security_alert_webhook_url,
             fee_estimator,
         }
     }

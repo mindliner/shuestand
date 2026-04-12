@@ -132,6 +132,7 @@ struct AppState {
     single_request_cap_ratio: f64,
     session_ttl: ChronoDuration,
     transaction_notifier: Option<Arc<TransactionNotifier>>,
+    security_alert_webhook_url: Option<String>,
     fee_estimator: Arc<FeeEstimator>,
 }
 
@@ -598,6 +599,7 @@ async fn main() -> Result<(), anyhow::Error> {
         single_request_cap_ratio: config.single_request_cap_ratio,
         session_ttl: ChronoDuration::hours(DEFAULT_SESSION_TTL_HOURS),
         transaction_notifier: transaction_notifier.clone(),
+        security_alert_webhook_url: config.security_alert_webhook_url.clone(),
         fee_estimator: fee_estimator.clone(),
     };
 

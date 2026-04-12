@@ -320,10 +320,19 @@ impl WithdrawalExecutor for CashuToOnchainExecutor {
             redeemed.amount_sats
         };
 
+        let requested_amount = withdrawal
+            .requested_amount_sats
+            .ok_or_else(|| anyhow!("withdrawal missing requested_amount_sats"))?;
+        if amount_sats < requested_amount {
+            return Err(anyhow!(
+                "redeemed amount ({amount_sats}) is below requested payout ({requested_amount})"
+            ));
+        }
+
         let fee_rate = self.fee_estimator.fast_rate().await.max(0.1);
         let txid = self
             .wallet
-            .send_to_address(&withdrawal.delivery_address, amount_sats, fee_rate)
+            .send_to_address(&withdrawal.delivery_address, requested_amount, fee_rate)
             .await?;
 
         Ok(WithdrawalOutcome {
