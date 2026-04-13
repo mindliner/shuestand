@@ -63,6 +63,8 @@ pub struct AppConfig {
     pub float_alert_webhook_url: Option<String>,
     pub transaction_webhook_url: Option<String>,
     pub security_alert_webhook_url: Option<String>,
+    pub trust_proxy_headers: bool,
+    pub cors_allowed_origins: Vec<String>,
     pub fee_estimator: FeeEstimatorSettings,
 }
 
@@ -257,6 +259,24 @@ impl AppConfig {
         let float_alert_webhook_url = std::env::var("FLOAT_ALERT_WEBHOOK_URL").ok();
         let transaction_webhook_url = std::env::var("TRANSACTION_WEBHOOK_URL").ok();
         let security_alert_webhook_url = std::env::var("SECURITY_ALERT_WEBHOOK_URL").ok();
+        let trust_proxy_headers = std::env::var("TRUST_PROXY_HEADERS")
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        let cors_allowed_origins = std::env::var("CORS_ALLOWED_ORIGINS")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
 
         if bitcoin_wallet_seed.is_some()
             && (bitcoin_descriptor.is_none()
@@ -317,6 +337,8 @@ impl AppConfig {
             float_alert_webhook_url,
             transaction_webhook_url,
             security_alert_webhook_url,
+            trust_proxy_headers,
+            cors_allowed_origins,
             fee_estimator,
         }
     }

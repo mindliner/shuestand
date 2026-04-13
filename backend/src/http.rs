@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
         header::{AUTHORIZATION, CONTENT_TYPE},
@@ -18,7 +18,6 @@ use sha2::{Digest, Sha256};
 use std::{
     borrow::ToOwned,
     collections::HashMap,
-    fs,
     sync::{Arc, Mutex, OnceLock},
     time::Instant,
 };
@@ -26,7 +25,10 @@ use uuid::Uuid;
 
 use crate::AppState;
 use backend::cashu::{TokenMintError, token_fingerprint, token_mint_url, token_total_amount};
-use backend::db::{Deposit, DepositState, Session, StateLiabilityRow, Withdrawal, WithdrawalState};
+use backend::db::{
+    Deposit, DepositState, PaymentRequestRecordOutcome, Session, StateLiabilityRow, Withdrawal,
+    WithdrawalState,
+};
 use backend::fees::FeeEstimateSnapshot;
 use backend::onchain::{OnchainBalance, OnchainWallet};
 use backend::operations::OperationMode;
@@ -74,11 +76,14 @@ const WITHDRAWAL_BURST_WINDOW_SECS: i64 = 60;
 const WITHDRAWAL_BURST_THRESHOLD: usize = 4;
 const OPERATOR_401_WINDOW_SECS: i64 = 60;
 const OPERATOR_401_THRESHOLD: usize = 20;
+const EMERGENCY_ESCALATION_WINDOW_SECS: i64 = 600;
+const MAX_API_BODY_BYTES: usize = 1024 * 1024;
 
 static SECURITY_WINDOW_BUCKETS: OnceLock<Mutex<HashMap<String, Vec<i64>>>> = OnceLock::new();
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .layer(DefaultBodyLimit::max(MAX_API_BODY_BYTES))
         .route("/healthz", get(healthcheck))
         .route("/metrics", get(export_metrics))
         .route("/api/v1/config", get(get_public_config))
@@ -818,7 +823,7 @@ async fn create_deposit(
     }
 
     let session = resolve_session_from_headers(&state, &headers).await?;
-    let client_hint = request_client_hint(&headers);
+    let client_hint = request_client_hint(&state, &headers);
     let session_hint = session
         .as_ref()
         .map(|s| s.id.clone())
@@ -990,7 +995,7 @@ async fn request_withdrawal(
     }
 
     let session = resolve_session_from_headers(&state, &headers).await?;
-    let client_hint = request_client_hint(&headers);
+    let client_hint = request_client_hint(&state, &headers);
     let session_hint = session
         .as_ref()
         .map(|s| s.id.clone())
@@ -1096,7 +1101,7 @@ async fn request_withdrawal(
                     "delivery_address": withdrawal.delivery_address,
                     "mint": mint_url,
                     "session_id": withdrawal.session_id,
-                    "client": request_client_hint(&headers),
+                    "client": request_client_hint(&state, &headers),
                 }),
             );
         }
@@ -1151,11 +1156,26 @@ async fn request_withdrawal(
     }))
 }
 
-fn request_client_hint(headers: &HeaderMap) -> String {
-    headers
+fn request_client_hint(state: &AppState, headers: &HeaderMap) -> String {
+    if !state.trust_proxy_headers {
+        return "proxy-untrusted".to_string();
+    }
+
+    if let Some(value) = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
-        .or_else(|| headers.get("x-real-ip").and_then(|v| v.to_str().ok()))
+        .and_then(|raw| raw.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return value.to_string();
+    }
+
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
         .unwrap_or("unknown")
         .to_string()
 }
@@ -1178,6 +1198,11 @@ fn detect_burst(scope: &str, key: &str, window_secs: i64, threshold: usize) -> O
 }
 
 fn emit_security_alert(state: &AppState, kind: &'static str, payload: serde_json::Value) {
+    let state_for_mode = state.clone();
+    tokio::spawn(async move {
+        maybe_auto_switch_operation_mode(&state_for_mode, kind).await;
+    });
+
     let Some(url) = state.security_alert_webhook_url.clone() else {
         return;
     };
@@ -1202,6 +1227,96 @@ fn emit_security_alert(state: &AppState, kind: &'static str, payload: serde_json
             }
         }
     });
+}
+
+async fn maybe_auto_switch_operation_mode(state: &AppState, kind: &'static str) {
+    if !matches!(
+        kind,
+        "withdrawal_burst_detected" | "withdrawal_token_ratio_anomaly"
+    ) {
+        return;
+    }
+
+    if let Err(err) = state.db.record_security_event(kind).await {
+        tracing::error!(
+            target: "backend",
+            error = %err,
+            kind,
+            "failed to record security event for mode escalation"
+        );
+        return;
+    }
+
+    let since = Utc::now() - Duration::seconds(EMERGENCY_ESCALATION_WINDOW_SECS);
+    let burst_count = match state
+        .db
+        .count_security_events_since("withdrawal_burst_detected", since)
+        .await
+    {
+        Ok(count) => count as usize,
+        Err(err) => {
+            tracing::error!(
+                target: "backend",
+                error = %err,
+                kind,
+                "failed to count withdrawal burst events for mode escalation"
+            );
+            return;
+        }
+    };
+    let ratio_count = match state
+        .db
+        .count_security_events_since("withdrawal_token_ratio_anomaly", since)
+        .await
+    {
+        Ok(count) => count as usize,
+        Err(err) => {
+            tracing::error!(
+                target: "backend",
+                error = %err,
+                kind,
+                "failed to count token-ratio anomaly events for mode escalation"
+            );
+            return;
+        }
+    };
+
+    let target = if burst_count >= 2 || ratio_count >= 2 || (burst_count >= 1 && ratio_count >= 1) {
+        OperationMode::Halt
+    } else {
+        OperationMode::Drain
+    };
+
+    let current = state.current_operation_mode().await;
+    if matches!(current, OperationMode::Halt)
+        || (matches!(current, OperationMode::Drain) && matches!(target, OperationMode::Drain))
+    {
+        return;
+    }
+
+    if let Err(err) = state.set_operation_mode(target).await {
+        tracing::error!(
+            target: "backend",
+            error = %err,
+            kind,
+            burst_count,
+            ratio_count,
+            target_mode = %target,
+            "failed to auto-switch operation mode after security event"
+        );
+        return;
+    }
+
+    tracing::warn!(
+        target: "backend",
+        kind,
+        burst_count,
+        ratio_count,
+        previous_mode = %current,
+        next_mode = %target,
+        window_seconds = EMERGENCY_ESCALATION_WINDOW_SECS,
+        "auto-switched operation mode after security event"
+    );
 }
 
 async fn get_withdrawal(
@@ -1407,14 +1522,6 @@ async fn submit_payment_request(
         }]
     });
     let token_body = serde_json::to_string(&token_json).map_err(server_error)?;
-    if let Err(err) = fs::write("/tmp/nut18-last-token.json", &token_body) {
-        tracing::warn!(
-            target: "backend",
-            withdrawal_id = %withdrawal.id,
-            error = %err,
-            "failed to write debug token snapshot"
-        );
-    }
     let token_v3: TokenV3 = serde_json::from_str(&token_body).map_err(|err| {
         tracing::warn!(
             target: "backend",
@@ -1438,29 +1545,6 @@ async fn submit_payment_request(
         }
         None => return Err(unavailable("on-chain wallet not configured")),
     };
-    let reserved_onchain = state
-        .db
-        .reserved_onchain_withdrawal_sats()
-        .await
-        .map_err(server_error)?;
-    let available_onchain = raw_onchain.saturating_sub(reserved_onchain);
-    let withdrawal_cap = ((available_onchain as f64) * state.single_request_cap_ratio).floor() as u64;
-    if withdrawal_cap == 0 || amount > withdrawal_cap {
-        tracing::warn!(
-            target: "backend",
-            withdrawal_id = %withdrawal.id,
-            amount_sats = amount,
-            raw_onchain,
-            reserved_onchain,
-            available_onchain,
-            withdrawal_cap,
-            "rejecting payment request callback due to on-chain reservation pressure"
-        );
-        return Err(unavailable(
-            "on-chain payout capacity is currently exhausted; try again shortly",
-        ));
-    }
-
     if let Some(expected) = withdrawal.requested_amount_sats {
         if amount < expected {
             tracing::warn!(
@@ -1474,29 +1558,40 @@ async fn submit_payment_request(
         }
     }
 
-    state
+    match state
         .db
-        .record_payment_request_token(&withdrawal.id, &encoded)
+        .record_payment_request_token_locked(
+            &withdrawal.id,
+            &encoded,
+            amount,
+            raw_onchain,
+            state.single_request_cap_ratio,
+        )
         .await
-        .map_err(|err| match err {
-            sqlx::Error::RowNotFound => {
-                tracing::warn!(
-                    target: "backend",
-                    withdrawal_id = %withdrawal.id,
-                    "payment request row missing when recording token"
-                );
-                conflict("withdrawal_not_accepting_payment")
-            }
-            other => {
-                tracing::error!(
-                    target: "backend",
-                    withdrawal_id = %withdrawal.id,
-                    error = %other,
-                    "failed to record payment request token"
-                );
-                server_error(other)
-            }
-        })?;
+        .map_err(server_error)?
+    {
+        PaymentRequestRecordOutcome::Recorded => {}
+        PaymentRequestRecordOutcome::NotAccepting => {
+            tracing::warn!(
+                target: "backend",
+                withdrawal_id = %withdrawal.id,
+                "payment request row missing or not funding when recording token"
+            );
+            return Err(conflict("withdrawal_not_accepting_payment"));
+        }
+        PaymentRequestRecordOutcome::CapacityExceeded => {
+            tracing::warn!(
+                target: "backend",
+                withdrawal_id = %withdrawal.id,
+                amount_sats = amount,
+                raw_onchain,
+                "rejecting payment request callback due to on-chain reservation pressure"
+            );
+            return Err(unavailable(
+                "on-chain payout capacity is currently exhausted; try again shortly",
+            ));
+        }
+    }
 
     tracing::info!(
         target: "backend",
@@ -2345,7 +2440,7 @@ fn require_operator_token(
         .and_then(|raw| raw.strip_prefix("Bearer "))
         .unwrap_or("");
     if provided != token {
-        let client_hint = request_client_hint(headers);
+        let client_hint = request_client_hint(state, headers);
         if let Some(count) = detect_burst(
             "operator401",
             &client_hint,

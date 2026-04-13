@@ -1,6 +1,6 @@
 use crate::operations::{OPERATION_MODE_KEY, OperationMode};
 use anyhow::Result as AnyResult;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{
@@ -16,6 +16,13 @@ const TRANSACTION_COUNTER_KEY: &str = "transaction_counter";
 #[derive(Clone)]
 pub struct Database {
     pub(crate) pool: PgPool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentRequestRecordOutcome {
+    Recorded,
+    NotAccepting,
+    CapacityExceeded,
 }
 
 impl Database {
@@ -445,6 +452,80 @@ impl Database {
             return Err(sqlx::Error::RowNotFound);
         }
         Ok(())
+    }
+
+    pub async fn record_payment_request_token_locked(
+        &self,
+        id: &str,
+        token: &str,
+        new_amount_sats: u64,
+        raw_onchain_sats: u64,
+        single_request_cap_ratio: f64,
+    ) -> Result<PaymentRequestRecordOutcome, Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(r#"LOCK TABLE withdrawals IN SHARE ROW EXCLUSIVE MODE"#)
+            .execute(&mut *tx)
+            .await?;
+
+        let row = sqlx::query(
+            r#"SELECT state,
+                      COALESCE(token_value_sats, requested_amount_sats, 0)::BIGINT AS reserved_amount
+               FROM withdrawals
+               WHERE id = $1
+               FOR UPDATE"#,
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let state: String = row.try_get("state")?;
+        if state != "funding" {
+            tx.rollback().await?;
+            return Ok(PaymentRequestRecordOutcome::NotAccepting);
+        }
+
+        let current_reserved = row.try_get::<i64, _>("reserved_amount")?.max(0) as u64;
+        let total_reserved = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COALESCE(SUM(COALESCE(token_value_sats, requested_amount_sats, 0)), 0)::BIGINT
+               FROM withdrawals
+               WHERE state IN ('funding', 'queued', 'broadcasting', 'confirming')"#,
+        )
+        .fetch_one(&mut *tx)
+        .await?
+        .max(0) as u64;
+
+        let adjusted_reserved = total_reserved
+            .saturating_sub(current_reserved)
+            .saturating_add(new_amount_sats);
+        let available_after = raw_onchain_sats.saturating_sub(adjusted_reserved);
+        let cap_after = ((available_after as f64) * single_request_cap_ratio).floor() as u64;
+        if cap_after == 0 || new_amount_sats > cap_after {
+            tx.rollback().await?;
+            return Ok(PaymentRequestRecordOutcome::CapacityExceeded);
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"UPDATE withdrawals
+               SET token = $2,
+                   state = 'queued',
+                   payment_request_fulfilled_at = $3,
+                   updated_at = $3
+               WHERE id = $1 AND state = 'funding'"#,
+        )
+        .bind(id)
+        .bind(token)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(PaymentRequestRecordOutcome::NotAccepting);
+        }
+
+        tx.commit().await?;
+        Ok(PaymentRequestRecordOutcome::Recorded)
     }
 
     pub async fn count_available_addresses(&self) -> Result<i64, Error> {
@@ -907,7 +988,7 @@ impl Database {
         let total = sqlx::query_scalar::<_, i64>(
             r#"SELECT COALESCE(SUM(COALESCE(token_value_sats, requested_amount_sats, 0)), 0)::BIGINT
                FROM withdrawals
-               WHERE state IN ('queued', 'broadcasting', 'confirming')"#,
+               WHERE state IN ('funding', 'queued', 'broadcasting', 'confirming')"#,
         )
         .fetch_one(&self.pool)
         .await?;
@@ -921,6 +1002,45 @@ impl Database {
                FROM deposits
                WHERE state IN ('confirming', 'minting', 'delivering', 'ready')"#,
         )
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(total.max(0) as u64)
+    }
+
+    pub async fn record_security_event(&self, kind: &str) -> Result<(), Error> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"INSERT INTO security_events (kind, created_at)
+               VALUES ($1, $2)"#,
+        )
+        .bind(kind)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        let cutoff = (Utc::now() - ChronoDuration::days(7)).to_rfc3339();
+        let _ = sqlx::query(r#"DELETE FROM security_events WHERE created_at < $1"#)
+            .bind(&cutoff)
+            .execute(&self.pool)
+            .await;
+
+        Ok(())
+    }
+
+    pub async fn count_security_events_since(
+        &self,
+        kind: &str,
+        since: DateTime<Utc>,
+    ) -> Result<u64, Error> {
+        let since = since.to_rfc3339();
+        let total = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COUNT(*)::BIGINT
+               FROM security_events
+               WHERE kind = $1 AND created_at >= $2"#,
+        )
+        .bind(kind)
+        .bind(&since)
         .fetch_one(&self.pool)
         .await?;
 

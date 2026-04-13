@@ -1,6 +1,9 @@
 use anyhow::Context;
 use async_trait::async_trait;
-use axum::http::Method;
+use axum::http::{
+    HeaderName, HeaderValue, Method,
+    header::{AUTHORIZATION, CONTENT_TYPE},
+};
 use backend::address::{AddressFactory, AddressPool};
 use backend::config::AppConfig;
 use backend::db::{Database, DepositState, WithdrawalState};
@@ -41,7 +44,7 @@ use tokio::{task::spawn_blocking, time::sleep};
 
 mod http;
 
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use urlencoding::encode as url_encode;
 
@@ -133,6 +136,7 @@ struct AppState {
     session_ttl: ChronoDuration,
     transaction_notifier: Option<Arc<TransactionNotifier>>,
     security_alert_webhook_url: Option<String>,
+    trust_proxy_headers: bool,
     fee_estimator: Arc<FeeEstimator>,
 }
 
@@ -574,10 +578,44 @@ async fn main() -> Result<(), anyhow::Error> {
         });
     }
 
-    let cors = CorsLayer::new()
+    let mut cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST])
-        .allow_headers(Any)
-        .allow_origin(Any);
+        .allow_headers([
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            HeaderName::from_static("x-shuestand-session"),
+        ]);
+
+    let mut allowed_origins = config.cors_allowed_origins.clone();
+    if allowed_origins.is_empty()
+        && let Some(base) = config.public_base_url.as_deref()
+        && let Ok(url) = reqwest::Url::parse(base)
+        && let Some(host) = url.host_str()
+    {
+        let mut origin = format!("{}://{}", url.scheme(), host);
+        if let Some(port) = url.port() {
+            origin.push(':');
+            origin.push_str(&port.to_string());
+        }
+        allowed_origins.push(origin);
+    }
+
+    if !allowed_origins.is_empty() {
+        let origin_values: Vec<HeaderValue> = allowed_origins
+            .iter()
+            .filter_map(|origin| match HeaderValue::from_str(origin) {
+                Ok(value) => Some(value),
+                Err(err) => {
+                    tracing::warn!(target: "backend", origin, error = %err, "invalid CORS origin dropped");
+                    None
+                }
+            })
+            .collect();
+
+        if !origin_values.is_empty() {
+            cors = cors.allow_origin(origin_values);
+        }
+    }
 
     let state = AppState {
         db: db.clone(),
@@ -600,6 +638,7 @@ async fn main() -> Result<(), anyhow::Error> {
         session_ttl: ChronoDuration::hours(DEFAULT_SESSION_TTL_HOURS),
         transaction_notifier: transaction_notifier.clone(),
         security_alert_webhook_url: config.security_alert_webhook_url.clone(),
+        trust_proxy_headers: config.trust_proxy_headers,
         fee_estimator: fee_estimator.clone(),
     };
 
