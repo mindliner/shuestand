@@ -24,6 +24,7 @@ const DEFAULT_FLOAT_MIN_RATIO: f32 = 0.5;
 const DEFAULT_FLOAT_MAX_RATIO: f32 = 2.0;
 const DEFAULT_FLOAT_GUARD_INTERVAL_SECS: u64 = 30;
 const DEFAULT_WITHDRAWAL_MIN_SATS: u64 = 50_000;
+const DEFAULT_WITHDRAWAL_FEE_BUFFER_SATS: u64 = 500;
 const DEFAULT_FLOAT_DRIFT_ALERT_RATIO: f32 = 0.1;
 const DEFAULT_SINGLE_REQUEST_RATIO: f64 = 0.5;
 
@@ -58,6 +59,7 @@ pub struct AppConfig {
     pub float_guard_interval: Duration,
     pub deposit_min_sats: u64,
     pub withdrawal_min_sats: u64,
+    pub withdrawal_fee_buffer_sats: u64,
     pub float_drift_alert_ratio: f32,
     pub single_request_cap_ratio: f64,
     pub float_alert_webhook_url: Option<String>,
@@ -189,6 +191,10 @@ impl AppConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|v| *v > 0)
             .unwrap_or(DEFAULT_WITHDRAWAL_MIN_SATS);
+        let withdrawal_fee_buffer_sats = std::env::var("WITHDRAWAL_FEE_BUFFER_SATS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_WITHDRAWAL_FEE_BUFFER_SATS);
         let deposit_min_sats = std::env::var("DEPOSIT_MIN_SATS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -332,6 +338,7 @@ impl AppConfig {
             float_guard_interval,
             deposit_min_sats,
             withdrawal_min_sats,
+            withdrawal_fee_buffer_sats,
             float_drift_alert_ratio,
             single_request_cap_ratio,
             float_alert_webhook_url,

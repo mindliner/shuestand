@@ -151,6 +151,7 @@ struct ApiError {
 #[derive(Serialize)]
 struct PublicConfigResponse {
     withdrawal_min_sats: u64,
+    withdrawal_fee_buffer_sats: u64,
     deposit_min_sats: u64,
     deposit_target_confirmations: u8,
     float_target_sats: u64,
@@ -188,6 +189,7 @@ async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicCon
 
     let payload = PublicConfigResponse {
         withdrawal_min_sats: state.withdrawal_min_sats,
+        withdrawal_fee_buffer_sats: state.withdrawal_fee_buffer_sats,
         deposit_min_sats: state.deposit_min_sats,
         deposit_target_confirmations: state.deposit_target_confirmations,
         float_target_sats: state.float_target_sats,
@@ -1122,10 +1124,18 @@ async fn request_withdrawal(
             id
         );
         let expires_at = now + Duration::seconds(PAYMENT_REQUEST_TTL_SECS);
-        let description = format!("Cashu → Bitcoin withdrawal {} sats", req.amount_sats);
+        let fee_buffer_sats = state.withdrawal_fee_buffer_sats;
+        let payment_request_amount = req
+            .amount_sats
+            .checked_add(fee_buffer_sats)
+            .ok_or_else(|| invalid_request("requested amount is too large"))?;
+        let description = format!(
+            "Cashu → Bitcoin withdrawal {} sats (includes {} sat fee buffer)",
+            req.amount_sats, fee_buffer_sats
+        );
         let request = Nut18PaymentRequest {
             id: Some(payment_request_id.clone()),
-            amount: Some(req.amount_sats),
+            amount: Some(payment_request_amount),
             unit: Some("sat".to_string()),
             single_use: Some(true),
             mints: Some(vec![canonical_mint.clone()]),
