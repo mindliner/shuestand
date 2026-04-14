@@ -158,6 +158,7 @@ struct PublicConfigResponse {
     float_min_ratio: f32,
     float_max_ratio: f32,
     single_request_cap_ratio: f64,
+    operation_mode: OperationMode,
     deposit_flow_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     deposit_flow_reason: Option<String>,
@@ -167,8 +168,19 @@ struct PublicConfigResponse {
 }
 
 async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicConfigResponse> {
+    let operation_mode = state.current_operation_mode().await;
     let (deposit_flow_enabled, deposit_flow_reason) = if state.cashu_wallet.is_none() {
         (false, Some(CASHU_WALLET_UNAVAILABLE_MESSAGE.to_string()))
+    } else if matches!(operation_mode, OperationMode::Drain) {
+        (
+            false,
+            Some("Shuestand is in maintenance mode (drain); new requests are disabled".to_string()),
+        )
+    } else if matches!(operation_mode, OperationMode::Halt) {
+        (
+            false,
+            Some("Shuestand is in maintenance mode (halt); processing is paused".to_string()),
+        )
     } else {
         let snapshot = state.float_status.read().await.clone();
         let cashu_balance = snapshot.cashu.balance_sats;
@@ -196,6 +208,7 @@ async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicCon
         float_min_ratio: state.float_min_ratio,
         float_max_ratio: state.float_max_ratio,
         single_request_cap_ratio: state.single_request_cap_ratio,
+        operation_mode,
         deposit_flow_enabled,
         deposit_flow_reason,
         cashu_mint_url: state.cashu_mint_url.clone(),

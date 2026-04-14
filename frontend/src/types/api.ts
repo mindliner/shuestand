@@ -210,6 +210,7 @@ export interface PublicConfigResponse {
   float_min_ratio: number
   float_max_ratio: number
   single_request_cap_ratio: number
+  operation_mode?: OperationMode
   deposit_flow_enabled: boolean
   deposit_flow_reason?: string | null
   cashu_mint_url?: string | null

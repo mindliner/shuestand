@@ -18,7 +18,13 @@ import { copyTextWithFallback } from './lib/clipboard'
 import { detectTokenMint } from './lib/cashu'
 import { isValidBitcoinAddress } from './lib/bitcoin'
 import type { Theme } from './lib/theme'
-import type { CreateWithdrawalRequest, SessionStartResponse, Deposit, Withdrawal } from './types/api'
+import type {
+  CreateWithdrawalRequest,
+  SessionStartResponse,
+  Deposit,
+  Withdrawal,
+  OperationMode,
+} from './types/api'
 import {
   ApiClientError,
   createDeposit,
@@ -102,6 +108,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     depositMinSats: config.depositMinSats,
     depositFlowEnabled: true,
     depositFlowReason: null as string | null,
+    operationMode: 'normal' as OperationMode,
     cashuMintUrl: config.cashuMintUrl ? config.cashuMintUrl.trim() : '',
   }))
   const navigate = useNavigate()
@@ -236,6 +243,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           Number.isFinite(depositMin) && depositMin > 0 ? depositMin : undefined
         const depositFlowEnabled = runtime.deposit_flow_enabled !== false
         const depositFlowReason = runtime.deposit_flow_reason ?? null
+        const operationMode = runtime.operation_mode ?? 'normal'
         const runtimeMint =
           typeof runtime.cashu_mint_url === 'string' ? runtime.cashu_mint_url.trim() : ''
         setLimits((current) => {
@@ -244,6 +252,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
             depositMinSats: resolvedDepositMin ?? current.depositMinSats,
             depositFlowEnabled,
             depositFlowReason,
+            operationMode,
             cashuMintUrl: runtimeMint,
           }
           if (
@@ -251,6 +260,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
             next.depositMinSats === current.depositMinSats &&
             next.depositFlowEnabled === current.depositFlowEnabled &&
             next.depositFlowReason === current.depositFlowReason &&
+            next.operationMode === current.operationMode &&
             next.cashuMintUrl === current.cashuMintUrl
           ) {
             return current
@@ -860,8 +870,14 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   )
   const hasTokenDetectionError = Boolean(tokenMintInfo && 'error' in tokenMintInfo)
   const depositFlowDisabled = !limits.depositFlowEnabled
+  const maintenanceMode =
+    limits.operationMode === 'drain' || limits.operationMode === 'halt'
   const depositDisabledMessage =
     limits.depositFlowReason ?? 'Deposits are temporarily disabled. Please contact the operator.'
+  const maintenanceMessage =
+    limits.operationMode === 'drain'
+      ? 'Shuestand is in maintenance mode (drain). New requests are temporarily disabled.'
+      : 'Shuestand is in maintenance mode (halt). Processing is paused.'
 
   const pickupError = pickupMutation.isError
     ? normalizeError(pickupMutation.error)
@@ -972,7 +988,14 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
       </header>
 
       <section className={panelClassName}>
-        {!hasSession ? (
+        {maintenanceMode ? (
+          <div className="session-card hero">
+            <p className="eyebrow">Maintenance mode</p>
+            <h2>Shuestand is temporarily unavailable</h2>
+            <p className="helper lead">{maintenanceMessage}</p>
+            <p className="helper subtle">Please try again later or contact the operator.</p>
+          </div>
+        ) : !hasSession ? (
             <div className="session-card hero">
               <p className="eyebrow">Work session</p>
             <h2>Start or resume to get going</h2>

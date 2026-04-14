@@ -1,5 +1,9 @@
 # Shuestand
 
+**Status:** Alpha (`v0.1.1-alpha`) - not production-ready.
+
+> APIs, database schemas, and operational behavior may change without backward compatibility while Shuestand is in alpha.
+
 Shuestand lets users fund a Cashu wallet directly with on-chain Bitcoin or withdraw cashu sats back out, all through a single, kiosk-friendly interface.
 
 ## Why Shuestand?
