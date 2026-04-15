@@ -790,13 +790,13 @@ impl Database {
                 updated_at = $2,
                 mint_error = 'expired_pending_timeout',
                 delivery_error = NULL
-            WHERE state = $3
-              AND confirmations = 0
-              AND created_at <= $4"#,
+            WHERE state IN ($3, $4)
+              AND created_at <= $5"#,
         )
         .bind(DepositState::Failed.as_str())
         .bind(&now)
         .bind(DepositState::Pending.as_str())
+        .bind(DepositState::PartialPaymentReceived.as_str())
         .bind(cutoff.to_rfc3339())
         .execute(&self.pool)
         .await?;

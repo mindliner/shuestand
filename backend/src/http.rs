@@ -848,6 +848,16 @@ async fn create_deposit(
             min_deposit_sats, MAX_DEPOSIT_SATS
         )));
     }
+    if req
+        .delivery_hint
+        .as_ref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return Err(invalid_request(
+            "delivery_hint is disabled for public deposits; use pickup_token flow",
+        ));
+    }
 
     let cashu_wallet = state
         .cashu_wallet
@@ -982,7 +992,7 @@ async fn create_deposit(
         state: DepositState::Pending,
         address: assigned.address,
         target_confirmations: state.deposit_target_confirmations,
-        delivery_hint: req.delivery_hint,
+        delivery_hint: None,
         metadata: req.metadata,
         txid: None,
         confirmations: 0,
