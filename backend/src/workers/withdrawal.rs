@@ -323,16 +323,25 @@ impl WithdrawalExecutor for CashuToOnchainExecutor {
         let requested_amount = withdrawal
             .requested_amount_sats
             .ok_or_else(|| anyhow!("withdrawal missing requested_amount_sats"))?;
-        if amount_sats < requested_amount {
-            return Err(anyhow!(
-                "redeemed amount ({amount_sats}) is below requested payout ({requested_amount})"
-            ));
-        }
+        let payout_amount = if amount_sats < requested_amount {
+            let shortfall = requested_amount - amount_sats;
+            tracing::warn!(
+                target: "backend",
+                withdrawal_id = %withdrawal.id,
+                requested_amount_sats = requested_amount,
+                redeemed_amount_sats = amount_sats,
+                shortfall_sats = shortfall,
+                "redeemed amount is below requested payout; continuing with redeemed amount"
+            );
+            amount_sats
+        } else {
+            requested_amount
+        };
 
         let fee_rate = self.fee_estimator.fast_rate().await.max(0.1);
         let txid = self
             .wallet
-            .send_to_address(&withdrawal.delivery_address, requested_amount, fee_rate)
+            .send_to_address(&withdrawal.delivery_address, payout_amount, fee_rate)
             .await?;
 
         Ok(WithdrawalOutcome {

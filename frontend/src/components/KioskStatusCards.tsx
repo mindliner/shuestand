@@ -94,7 +94,6 @@ export function DepositStatusCard({
   }
 
   const bip21 = buildBip21Uri(deposit.address, deposit.amount_sats)
-  const pickupCode = pickupToken ? pickupToken.slice(-6).toUpperCase() : null
   const awaitingConfirmations =
     deposit.state === 'pending' || deposit.state === 'confirming'
   const confirmationEtaText = awaitingConfirmations
@@ -109,9 +108,6 @@ export function DepositStatusCard({
   return (
     <div className="status-block">
       <h3>Deposit progress</h3>
-      {pickupCode && (
-        <p className="status-meta">Pickup code: <strong>{pickupCode}</strong></p>
-      )}
       <p className="status-meta code">{deposit.id}</p>
       <CopyButton label="Copy deposit ID" text={deposit.id} />
       {bip21 && (
