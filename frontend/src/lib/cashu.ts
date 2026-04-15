@@ -1,4 +1,4 @@
-import { getDecodedToken } from '@cashu/cashu-ts'
+import { getTokenMetadata } from '@cashu/cashu-ts'
 
 const DEFAULT_ERROR = 'Unable to decode token'
 
@@ -12,19 +12,6 @@ const extractCashuToken = (raw: string): string | null => {
 
 type AmountLike = number | bigint | { toString?: () => string } | null | undefined
 
-type ProofLike = { amount?: AmountLike }
-
-type TokenEntryLike = {
-  mint?: string
-  proofs?: ProofLike[]
-}
-
-type DecodedTokenLike = {
-  mint?: string
-  proofs?: ProofLike[]
-  token?: TokenEntryLike[]
-}
-
 const toNumericAmount = (amount: AmountLike): number => {
   if (amount == null) return 0
   if (typeof amount === 'number') return Number.isFinite(amount) ? amount : 0
@@ -34,27 +21,6 @@ const toNumericAmount = (amount: AmountLike): number => {
     return Number.isFinite(value) ? value : 0
   }
   return 0
-}
-
-const sumProofList = (proofs?: ProofLike[]): number => {
-  if (!proofs?.length) return 0
-  return proofs.reduce((proofTotal, proof) => proofTotal + toNumericAmount(proof?.amount), 0)
-}
-
-const sumProofAmounts = (decoded: DecodedTokenLike | null): number => {
-  if (!decoded) return 0
-  const nestedSum = decoded.token?.reduce((total, entry) => {
-    return total + sumProofList(entry?.proofs)
-  }, 0) ?? 0
-  return sumProofList(decoded.proofs) + nestedSum
-}
-
-const resolveMintUrl = (decoded: DecodedTokenLike | null): string | null => {
-  if (!decoded) return null
-  const rootMint = decoded.mint?.trim()
-  if (rootMint) return rootMint
-  const nestedMint = decoded.token?.find((entry) => entry?.mint)?.mint?.trim()
-  return nestedMint || null
 }
 
 export type DetectedTokenMint =
@@ -67,12 +33,12 @@ export const detectTokenMint = (rawToken: string): DetectedTokenMint => {
   if (!candidate) return null
 
   try {
-    const decoded = getDecodedToken(candidate, []) as unknown as DecodedTokenLike | null
-    const mintUrl = resolveMintUrl(decoded)
+    const metadata = getTokenMetadata(candidate)
+    const mintUrl = metadata?.mint?.trim()
     if (!mintUrl) {
       return { error: DEFAULT_ERROR }
     }
-    const amount = sumProofAmounts(decoded)
+    const amount = toNumericAmount(metadata.amount)
     if (!amount) {
       return { error: 'Could not decode the token value (the backend will still validate it)' }
     }
