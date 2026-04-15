@@ -10,7 +10,9 @@ const extractCashuToken = (raw: string): string | null => {
   return compact.slice(idx)
 }
 
-type ProofLike = { amount?: number }
+type AmountLike = number | bigint | { toString?: () => string } | null | undefined
+
+type ProofLike = { amount?: AmountLike }
 
 type TokenEntryLike = {
   mint?: string
@@ -23,12 +25,20 @@ type DecodedTokenLike = {
   token?: TokenEntryLike[]
 }
 
+const toNumericAmount = (amount: AmountLike): number => {
+  if (amount == null) return 0
+  if (typeof amount === 'number') return Number.isFinite(amount) ? amount : 0
+  if (typeof amount === 'bigint') return Number(amount)
+  if (typeof amount === 'object' && typeof amount.toString === 'function') {
+    const value = Number(amount.toString())
+    return Number.isFinite(value) ? value : 0
+  }
+  return 0
+}
+
 const sumProofList = (proofs?: ProofLike[]): number => {
   if (!proofs?.length) return 0
-  return proofs.reduce((proofTotal, proof) => {
-    const value = Number(proof?.amount ?? 0)
-    return proofTotal + (Number.isFinite(value) ? value : 0)
-  }, 0)
+  return proofs.reduce((proofTotal, proof) => proofTotal + toNumericAmount(proof?.amount), 0)
 }
 
 const sumProofAmounts = (decoded: DecodedTokenLike | null): number => {
@@ -57,7 +67,7 @@ export const detectTokenMint = (rawToken: string): DetectedTokenMint => {
   if (!candidate) return null
 
   try {
-    const decoded = getDecodedToken(candidate) as DecodedTokenLike | null
+    const decoded = getDecodedToken(candidate, []) as unknown as DecodedTokenLike | null
     const mintUrl = resolveMintUrl(decoded)
     if (!mintUrl) {
       return { error: DEFAULT_ERROR }
