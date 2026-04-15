@@ -76,8 +76,6 @@ const WITHDRAWAL_BURST_WINDOW_SECS: i64 = 60;
 const WITHDRAWAL_BURST_THRESHOLD: usize = 4;
 const DEPOSIT_BURST_WINDOW_SECS: i64 = 60;
 const DEPOSIT_BURST_THRESHOLD: usize = 4;
-const MAX_PENDING_DEPOSITS_PER_SESSION: u64 = 2;
-const PENDING_DEPOSIT_TTL_SECS: i64 = 600;
 const SESSION_BURST_WINDOW_SECS: i64 = 300;
 const SESSION_BURST_THRESHOLD_PER_IP: usize = 6;
 const SESSION_BURST_THRESHOLD_PER_SUBNET: usize = 12;
@@ -166,6 +164,8 @@ struct PublicConfigResponse {
     float_min_ratio: f32,
     float_max_ratio: f32,
     single_request_cap_ratio: f64,
+    pending_deposit_ttl_secs: u64,
+    max_pending_deposits_per_session: u64,
     operation_mode: OperationMode,
     deposit_flow_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -216,6 +216,8 @@ async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicCon
         float_min_ratio: state.float_min_ratio,
         float_max_ratio: state.float_max_ratio,
         single_request_cap_ratio: state.single_request_cap_ratio,
+        pending_deposit_ttl_secs: state.pending_deposit_ttl_secs,
+        max_pending_deposits_per_session: state.max_pending_deposits_per_session,
         operation_mode,
         deposit_flow_enabled,
         deposit_flow_reason,
@@ -833,7 +835,8 @@ async fn create_deposit(
         mode => return Err(mode_blocked(mode, "deposits")),
     }
 
-    let pending_cutoff = Utc::now() - Duration::seconds(PENDING_DEPOSIT_TTL_SECS);
+    let pending_cutoff =
+        Utc::now() - Duration::seconds(state.pending_deposit_ttl_secs as i64);
     if let Err(err) = state.db.expire_stale_pending_deposits(pending_cutoff).await {
         tracing::warn!(target: "backend", error = %err, "failed to expire stale pending deposits");
     }
@@ -934,7 +937,7 @@ async fn create_deposit(
             )
             .await
             .map_err(server_error)?;
-        if pending_count >= MAX_PENDING_DEPOSITS_PER_SESSION {
+        if pending_count >= state.max_pending_deposits_per_session {
             return Err(too_many_requests(
                 "session_pending_deposit_limit",
                 "too many pending deposits in this session; wait for confirmations or start a new session",
@@ -2239,7 +2242,8 @@ async fn get_ledger_snapshot(
 ) -> ApiResult<LedgerSnapshotResponse> {
     require_operator_token(&state, &headers)?;
 
-    let pending_cutoff = Utc::now() - Duration::seconds(PENDING_DEPOSIT_TTL_SECS);
+    let pending_cutoff =
+        Utc::now() - Duration::seconds(state.pending_deposit_ttl_secs as i64);
     if let Err(err) = state.db.expire_stale_pending_deposits(pending_cutoff).await {
         tracing::warn!(target: "backend", error = %err, "failed to expire stale pending deposits");
     }
