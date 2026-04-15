@@ -691,6 +691,33 @@ impl Database {
         rows.into_iter().map(Self::map_deposit).collect()
     }
 
+    pub async fn count_deposits_for_session_states(
+        &self,
+        session_id: &str,
+        states: &[DepositState],
+    ) -> Result<u64, Error> {
+        if states.is_empty() {
+            return Ok(0);
+        }
+
+        let placeholders = (2..=(states.len() + 1))
+            .map(|i| format!("${}", i))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT COUNT(*)::BIGINT AS total FROM deposits WHERE session_id = $1 AND state IN ({})",
+            placeholders
+        );
+
+        let mut query = sqlx::query_scalar::<_, i64>(&sql).bind(session_id);
+        for state in states {
+            query = query.bind(state.as_str());
+        }
+
+        let count = query.fetch_one(&self.pool).await?;
+        Ok(count.max(0) as u64)
+    }
+
     pub async fn manual_update_deposit_state(
         &self,
         id: &str,
