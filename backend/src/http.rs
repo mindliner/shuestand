@@ -59,8 +59,9 @@ const DEFAULT_WITHDRAWAL_STATES: [WithdrawalState; 5] = [
     WithdrawalState::Confirming,
     WithdrawalState::Failed,
 ];
-const DEFAULT_DEPOSIT_STATES: [DepositState; 6] = [
+const DEFAULT_DEPOSIT_STATES: [DepositState; 7] = [
     DepositState::Pending,
+    DepositState::PartialPaymentReceived,
     DepositState::Confirming,
     DepositState::Minting,
     DepositState::Delivering,
@@ -933,7 +934,11 @@ async fn create_deposit(
             .db
             .count_deposits_for_session_states(
                 &active_session.id,
-                &[DepositState::Pending, DepositState::Confirming],
+                &[
+                    DepositState::Pending,
+                    DepositState::PartialPaymentReceived,
+                    DepositState::Confirming,
+                ],
             )
             .await
             .map_err(server_error)?;
@@ -947,7 +952,11 @@ async fn create_deposit(
 
     let global_pending = state
         .db
-        .count_deposits_by_states(&[DepositState::Pending, DepositState::Confirming])
+        .count_deposits_by_states(&[
+            DepositState::Pending,
+            DepositState::PartialPaymentReceived,
+            DepositState::Confirming,
+        ])
         .await
         .map_err(server_error)?;
     if global_pending >= MAX_GLOBAL_PENDING_DEPOSITS {
@@ -2285,7 +2294,11 @@ async fn get_ledger_snapshot(
 
     let deposits_pending = sum_deposit_states(
         &deposit_rows,
-        &[DepositState::Pending, DepositState::Confirming],
+        &[
+            DepositState::Pending,
+            DepositState::PartialPaymentReceived,
+            DepositState::Confirming,
+        ],
     );
     let deposits_minting = sum_deposit_states(
         &deposit_rows,

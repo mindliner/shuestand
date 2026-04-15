@@ -95,7 +95,9 @@ export function DepositStatusCard({
 
   const bip21 = buildBip21Uri(deposit.address, deposit.amount_sats)
   const awaitingConfirmations =
-    deposit.state === 'pending' || deposit.state === 'confirming'
+    deposit.state === 'pending' ||
+    deposit.state === 'partial_payment_received' ||
+    deposit.state === 'confirming'
   const confirmationEtaText = awaitingConfirmations
     ? getConfirmationEtaText(deposit) ?? 'waiting for final block'
     : null
@@ -120,6 +122,11 @@ export function DepositStatusCard({
         <strong>{deposit.state}</strong> {deposit.confirmations}/
         {deposit.target_confirmations} confs
       </p>
+      {deposit.state === 'partial_payment_received' && (
+        <p className="status-error">
+          Partial payment received. Send the remaining sats to this same address, then wait for confirmations.
+        </p>
+      )}
       {confirmationEtaText && (
         <p className="status-meta">
           Estimated time to mint: {confirmationEtaText}. We'll notify this device when the token is ready.
@@ -432,6 +439,11 @@ type Stage<T extends string> = {
 
 const DEPOSIT_STAGES: Stage<DepositState>[] = [
   { key: 'pending', label: 'Address allocated', helper: 'Waiting for funding tx' },
+  {
+    key: 'partial_payment_received',
+    label: 'Partial payment received',
+    helper: 'Send remaining sats to the same address',
+  },
   {
     key: 'confirming',
     label: 'Confirmations in progress',

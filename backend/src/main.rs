@@ -1048,18 +1048,6 @@ async fn process_confirmations(db: &Database, chain: &dyn ChainSource) -> Result
 
     for deposit in deposits {
         if let Some(observation) = chain.first_matching_tx(&deposit.address).await? {
-            if observation.received_sats < deposit.amount_sats {
-                tracing::warn!(
-                    target: "backend",
-                    deposit_id = %deposit.id,
-                    txid = %observation.txid,
-                    expected_sats = deposit.amount_sats,
-                    received_sats = observation.received_sats,
-                    "ignoring underpaid deposit transaction"
-                );
-                continue;
-            }
-
             if observation.confirmed {
                 if let Some(seen_at) = observation.seen_at {
                     if seen_at + ChronoDuration::seconds(PREDEPOSIT_TX_TOLERANCE_SECS)
@@ -1085,6 +1073,27 @@ async fn process_confirmations(db: &Database, chain: &dyn ChainSource) -> Result
             } else {
                 0
             };
+
+            if observation.received_sats < deposit.amount_sats {
+                tracing::warn!(
+                    target: "backend",
+                    deposit_id = %deposit.id,
+                    txid = %observation.txid,
+                    expected_sats = deposit.amount_sats,
+                    received_sats = observation.received_sats,
+                    "underpaid deposit transaction detected"
+                );
+                db.update_deposit_chain_state(
+                    &deposit.id,
+                    &observation.txid,
+                    confirmations,
+                    DepositState::PartialPaymentReceived,
+                )
+                .await?;
+                db.update_address_observation(&deposit.id, &observation.txid, confirmations)
+                    .await?;
+                continue;
+            }
 
             let new_state = if confirmations >= deposit.target_confirmations as u32 {
                 DepositState::Minting
