@@ -1048,6 +1048,18 @@ async fn process_confirmations(db: &Database, chain: &dyn ChainSource) -> Result
 
     for deposit in deposits {
         if let Some(observation) = chain.first_matching_tx(&deposit.address).await? {
+            if observation.received_sats < deposit.amount_sats {
+                tracing::warn!(
+                    target: "backend",
+                    deposit_id = %deposit.id,
+                    txid = %observation.txid,
+                    expected_sats = deposit.amount_sats,
+                    received_sats = observation.received_sats,
+                    "ignoring underpaid deposit transaction"
+                );
+                continue;
+            }
+
             if observation.confirmed {
                 if let Some(seen_at) = observation.seen_at {
                     if seen_at + ChronoDuration::seconds(PREDEPOSIT_TX_TOLERANCE_SECS)
@@ -1205,11 +1217,13 @@ struct EsploraStatus {
 struct EsploraVout {
     #[serde(default)]
     scriptpubkey_address: Option<String>,
+    value: u64,
 }
 
 #[derive(Clone, Debug)]
 struct ObservedTx {
     txid: String,
+    received_sats: u64,
     confirmed: bool,
     block_height: Option<u32>,
     seen_at: Option<DateTime<Utc>>,
@@ -1272,6 +1286,12 @@ impl ChainSource for EsploraClient {
             };
             let candidate = ObservedTx {
                 txid: tx.txid,
+                received_sats: tx
+                    .vout
+                    .iter()
+                    .filter(|v| v.scriptpubkey_address.as_deref() == Some(address))
+                    .map(|v| v.value)
+                    .sum(),
                 confirmed: tx.status.confirmed,
                 block_height: tx.status.block_height,
                 seen_at,
@@ -1311,13 +1331,14 @@ impl ChainSource for ElectrumChainSource {
             .require_network(self.network)
             .context("address network mismatch")?;
         let script = parsed.script_pubkey();
+        let history_script = script.clone();
         let client = self.client.clone();
         let entry = spawn_blocking(
             move || -> Result<Option<electrum_client::GetHistoryRes>, electrum_client::Error> {
                 let mut history = client
                     .lock()
                     .expect("electrum client poisoned")
-                    .script_get_history(&script)?;
+                    .script_get_history(&history_script)?;
                 Ok(history.pop())
             },
         )
@@ -1326,6 +1347,25 @@ impl ChainSource for ElectrumChainSource {
         let Some(item) = entry else {
             return Ok(None);
         };
+        let txid = item.tx_hash;
+        let script_for_sum = script.clone();
+        let txid_for_lookup = txid;
+        let client_for_lookup = self.client.clone();
+        let received_sats = spawn_blocking(move || {
+            let guard = client_for_lookup
+                .lock()
+                .expect("electrum client poisoned");
+            let tx = guard.transaction_get(&txid_for_lookup)?;
+            Ok::<u64, electrum_client::Error>(
+                tx.output
+                    .iter()
+                    .filter(|out| out.script_pubkey == script_for_sum)
+                    .map(|out| out.value)
+                    .sum(),
+            )
+        })
+        .await??;
+
         let confirmed = item.height > 0;
         let block_height = if confirmed {
             Some(item.height as u32)
@@ -1347,7 +1387,8 @@ impl ChainSource for ElectrumChainSource {
             None
         };
         Ok(Some(ObservedTx {
-            txid: item.tx_hash.to_string(),
+            txid: txid.to_string(),
+            received_sats,
             confirmed,
             block_height,
             seen_at,
