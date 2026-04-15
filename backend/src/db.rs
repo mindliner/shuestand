@@ -718,6 +718,29 @@ impl Database {
         Ok(count.max(0) as u64)
     }
 
+    pub async fn count_deposits_by_states(&self, states: &[DepositState]) -> Result<u64, Error> {
+        if states.is_empty() {
+            return Ok(0);
+        }
+
+        let placeholders = (1..=states.len())
+            .map(|i| format!("${}", i))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT COUNT(*)::BIGINT AS total FROM deposits WHERE state IN ({})",
+            placeholders
+        );
+
+        let mut query = sqlx::query_scalar::<_, i64>(&sql);
+        for state in states {
+            query = query.bind(state.as_str());
+        }
+
+        let count = query.fetch_one(&self.pool).await?;
+        Ok(count.max(0) as u64)
+    }
+
     pub async fn manual_update_deposit_state(
         &self,
         id: &str,

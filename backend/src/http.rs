@@ -78,6 +78,10 @@ const DEPOSIT_BURST_WINDOW_SECS: i64 = 60;
 const DEPOSIT_BURST_THRESHOLD: usize = 4;
 const MAX_PENDING_DEPOSITS_PER_SESSION: u64 = 2;
 const PENDING_DEPOSIT_TTL_SECS: i64 = 600;
+const SESSION_BURST_WINDOW_SECS: i64 = 300;
+const SESSION_BURST_THRESHOLD_PER_IP: usize = 6;
+const SESSION_BURST_THRESHOLD_PER_SUBNET: usize = 12;
+const MAX_GLOBAL_PENDING_DEPOSITS: u64 = 24;
 const OPERATOR_401_WINDOW_SECS: i64 = 60;
 const OPERATOR_401_THRESHOLD: usize = 20;
 const EMERGENCY_ESCALATION_WINDOW_SECS: i64 = 600;
@@ -695,7 +699,51 @@ async fn export_metrics(State(state): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, headers, state.metrics.encode())
 }
 
-async fn start_session(State(state): State<AppState>) -> ApiResult<SessionStartResponse> {
+async fn start_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<SessionStartResponse> {
+    let client_hint = request_client_hint(&state, &headers);
+    let ip_burst = detect_burst("session_start", &client_hint, SESSION_BURST_WINDOW_SECS);
+    if ip_burst >= SESSION_BURST_THRESHOLD_PER_IP {
+        emit_security_alert(
+            &state,
+            "session_start_burst_detected",
+            json!({
+                "count": ip_burst,
+                "window_seconds": SESSION_BURST_WINDOW_SECS,
+                "threshold": SESSION_BURST_THRESHOLD_PER_IP,
+                "scope": "ip",
+                "client": client_hint,
+            }),
+        );
+        return Err(too_many_requests(
+            "session_rate_limited",
+            "too many new sessions from this source; please wait and try again",
+        ));
+    }
+
+    if let Some(subnet_hint) = client_subnet_hint(&client_hint) {
+        let subnet_burst = detect_burst("session_start_subnet", &subnet_hint, SESSION_BURST_WINDOW_SECS);
+        if subnet_burst >= SESSION_BURST_THRESHOLD_PER_SUBNET {
+            emit_security_alert(
+                &state,
+                "session_start_burst_detected",
+                json!({
+                    "count": subnet_burst,
+                    "window_seconds": SESSION_BURST_WINDOW_SECS,
+                    "threshold": SESSION_BURST_THRESHOLD_PER_SUBNET,
+                    "scope": "subnet",
+                    "subnet": subnet_hint,
+                }),
+            );
+            return Err(too_many_requests(
+                "session_rate_limited",
+                "session creation temporarily rate-limited for this network",
+            ));
+        }
+    }
+
     let now = Utc::now();
     let expires_at = now + state.session_ttl;
     let (token, claim_code) = generate_session_token();
@@ -892,6 +940,18 @@ async fn create_deposit(
                 "too many pending deposits in this session; wait for confirmations or start a new session",
             ));
         }
+    }
+
+    let global_pending = state
+        .db
+        .count_deposits_by_states(&[DepositState::Pending, DepositState::Confirming])
+        .await
+        .map_err(server_error)?;
+    if global_pending >= MAX_GLOBAL_PENDING_DEPOSITS {
+        return Err(too_many_requests(
+            "global_pending_deposit_limit",
+            "too many pending deposits globally; please retry shortly",
+        ));
     }
 
     let id = format!("dep_{}", Uuid::new_v4());
@@ -1231,6 +1291,18 @@ fn request_client_hint(state: &AppState, headers: &HeaderMap) -> String {
         .filter(|v| !v.is_empty())
         .unwrap_or("unknown")
         .to_string()
+}
+
+fn client_subnet_hint(client_hint: &str) -> Option<String> {
+    let mut parts = client_hint.split('.');
+    let a = parts.next()?.parse::<u8>().ok()?;
+    let b = parts.next()?.parse::<u8>().ok()?;
+    let c = parts.next()?.parse::<u8>().ok()?;
+    let _d = parts.next()?.parse::<u8>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{}.{}.{}", a, b, c))
 }
 
 fn detect_burst(scope: &str, key: &str, window_secs: i64) -> usize {
