@@ -77,6 +77,7 @@ const WITHDRAWAL_BURST_THRESHOLD: usize = 4;
 const DEPOSIT_BURST_WINDOW_SECS: i64 = 60;
 const DEPOSIT_BURST_THRESHOLD: usize = 4;
 const MAX_PENDING_DEPOSITS_PER_SESSION: u64 = 2;
+const PENDING_DEPOSIT_TTL_SECS: i64 = 600;
 const OPERATOR_401_WINDOW_SECS: i64 = 60;
 const OPERATOR_401_THRESHOLD: usize = 20;
 const EMERGENCY_ESCALATION_WINDOW_SECS: i64 = 600;
@@ -782,6 +783,11 @@ async fn create_deposit(
     match state.current_operation_mode().await {
         OperationMode::Normal => {}
         mode => return Err(mode_blocked(mode, "deposits")),
+    }
+
+    let pending_cutoff = Utc::now() - Duration::seconds(PENDING_DEPOSIT_TTL_SECS);
+    if let Err(err) = state.db.expire_stale_pending_deposits(pending_cutoff).await {
+        tracing::warn!(target: "backend", error = %err, "failed to expire stale pending deposits");
     }
 
     if req.amount_sats < min_deposit_sats || req.amount_sats > MAX_DEPOSIT_SATS {
@@ -2160,6 +2166,11 @@ async fn get_ledger_snapshot(
     headers: HeaderMap,
 ) -> ApiResult<LedgerSnapshotResponse> {
     require_operator_token(&state, &headers)?;
+
+    let pending_cutoff = Utc::now() - Duration::seconds(PENDING_DEPOSIT_TTL_SECS);
+    if let Err(err) = state.db.expire_stale_pending_deposits(pending_cutoff).await {
+        tracing::warn!(target: "backend", error = %err, "failed to expire stale pending deposits");
+    }
 
     let onchain_balance = match state.onchain_wallet.as_ref() {
         Some(wallet) => Some(wallet.balance().await.map_err(server_error)?),

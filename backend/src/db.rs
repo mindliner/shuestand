@@ -756,6 +756,30 @@ impl Database {
         Ok(())
     }
 
+    pub async fn expire_stale_pending_deposits(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64, Error> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"UPDATE deposits
+            SET state = $1,
+                updated_at = $2,
+                mint_error = 'expired_pending_timeout',
+                delivery_error = NULL
+            WHERE state = $3
+              AND confirmations = 0
+              AND created_at <= $4"#,
+        )
+        .bind(DepositState::Failed.as_str())
+        .bind(&now)
+        .bind(DepositState::Pending.as_str())
+        .bind(cutoff.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn record_mint_success(
         &self,
         deposit_id: &str,
