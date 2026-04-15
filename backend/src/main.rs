@@ -1047,65 +1047,93 @@ async fn process_confirmations(db: &Database, chain: &dyn ChainSource) -> Result
     let tip_height = chain.tip_height().await?;
 
     for deposit in deposits {
-        if let Some(observation) = chain.first_matching_tx(&deposit.address).await? {
-            if observation.confirmed {
-                if let Some(seen_at) = observation.seen_at {
+        let observations = chain.matching_txs(&deposit.address).await?;
+        if observations.is_empty() {
+            continue;
+        }
+
+        let mut valid = Vec::new();
+        for obs in observations {
+            if obs.confirmed {
+                if let Some(seen_at) = obs.seen_at {
                     if seen_at + ChronoDuration::seconds(PREDEPOSIT_TX_TOLERANCE_SECS)
                         < deposit.created_at
                     {
                         tracing::info!(
                             target: "backend",
                             deposit_id = %deposit.id,
-                            txid = %observation.txid,
+                            txid = %obs.txid,
                             "ignoring transaction confirmed before deposit was created"
                         );
                         continue;
                     }
                 }
             }
+            valid.push(obs);
+        }
 
-            let confirmations = if observation.confirmed {
-                match observation.block_height {
+        if valid.is_empty() {
+            continue;
+        }
+
+        valid.sort_by_key(|obs| obs.seen_at);
+        let display_txid = valid
+            .last()
+            .map(|obs| obs.txid.as_str())
+            .unwrap_or_default();
+
+        let total_received: u64 = valid.iter().map(|obs| obs.received_sats).sum();
+        let best_confirmations = valid
+            .iter()
+            .map(|obs| {
+                if obs.confirmed {
+                    match obs.block_height {
+                        Some(height) if tip_height >= height => tip_height - height + 1,
+                        Some(_) => 1,
+                        None => 1,
+                    }
+                } else {
+                    0
+                }
+            })
+            .max()
+            .unwrap_or(0);
+
+        let confirmed_covering_amount: u64 = valid
+            .iter()
+            .filter_map(|obs| {
+                if !obs.confirmed {
+                    return None;
+                }
+                let confs = match obs.block_height {
                     Some(height) if tip_height >= height => tip_height - height + 1,
                     Some(_) => 1,
                     None => 1,
-                }
-            } else {
-                0
-            };
+                };
+                (confs >= deposit.target_confirmations as u32).then_some(obs.received_sats)
+            })
+            .sum();
 
-            if observation.received_sats < deposit.amount_sats {
-                tracing::warn!(
-                    target: "backend",
-                    deposit_id = %deposit.id,
-                    txid = %observation.txid,
-                    expected_sats = deposit.amount_sats,
-                    received_sats = observation.received_sats,
-                    "underpaid deposit transaction detected"
-                );
-                db.update_deposit_chain_state(
-                    &deposit.id,
-                    &observation.txid,
-                    confirmations,
-                    DepositState::PartialPaymentReceived,
-                )
-                .await?;
-                db.update_address_observation(&deposit.id, &observation.txid, confirmations)
-                    .await?;
-                continue;
-            }
+        let (next_state, confirmations) = if total_received < deposit.amount_sats {
+            tracing::warn!(
+                target: "backend",
+                deposit_id = %deposit.id,
+                txid = %display_txid,
+                expected_sats = deposit.amount_sats,
+                received_sats = total_received,
+                "partial deposit funding detected"
+            );
+            (DepositState::PartialPaymentReceived, best_confirmations)
+        } else if confirmed_covering_amount >= deposit.amount_sats {
+            (DepositState::Minting, deposit.target_confirmations as u32)
+        } else {
+            (DepositState::Confirming, best_confirmations)
+        };
 
-            let new_state = if confirmations >= deposit.target_confirmations as u32 {
-                DepositState::Minting
-            } else {
-                DepositState::Confirming
-            };
-
-            db.update_deposit_chain_state(&deposit.id, &observation.txid, confirmations, new_state)
-                .await?;
-            db.update_address_observation(&deposit.id, &observation.txid, confirmations)
-                .await?;
-        }
+        db.update_deposit_chain_state(&deposit.id, display_txid, confirmations, next_state)
+            .await?;
+        db.update_address_observation(&deposit.id, display_txid, confirmations)
+            .await?;
     }
 
     Ok(())
@@ -1164,7 +1192,7 @@ async fn process_withdrawal_settlements(
 #[async_trait]
 trait ChainSource: Send + Sync {
     async fn tip_height(&self) -> anyhow::Result<u32>;
-    async fn first_matching_tx(&self, address: &str) -> anyhow::Result<Option<ObservedTx>>;
+    async fn matching_txs(&self, address: &str) -> anyhow::Result<Vec<ObservedTx>>;
 }
 
 struct EsploraClient {
@@ -1242,21 +1270,6 @@ fn unix_seconds_to_datetime(ts: u64) -> Option<DateTime<Utc>> {
     DateTime::<Utc>::from_timestamp(ts as i64, 0)
 }
 
-fn tx_rank(confirmed: bool, block_height: Option<u32>) -> u64 {
-    if !confirmed {
-        return u64::MAX;
-    }
-    block_height.map(|h| h as u64).unwrap_or(0)
-}
-
-fn is_newer(candidate: &ObservedTx, current: &ObservedTx) -> bool {
-    match (candidate.seen_at, current.seen_at) {
-        (Some(cand), Some(curr)) => cand > curr,
-        (Some(_), None) => true,
-        _ => false,
-    }
-}
-
 #[async_trait]
 impl ChainSource for EsploraClient {
     async fn tip_height(&self) -> anyhow::Result<u32> {
@@ -1272,20 +1285,22 @@ impl ChainSource for EsploraClient {
         Ok(text.trim().parse::<u32>()?)
     }
 
-    async fn first_matching_tx(&self, address: &str) -> anyhow::Result<Option<ObservedTx>> {
+    async fn matching_txs(&self, address: &str) -> anyhow::Result<Vec<ObservedTx>> {
         let url = format!("{}/address/{}/txs", self.base_url, url_encode(address));
         let resp = self.http.get(url).send().await?;
         if resp.status() == HttpStatus::NOT_FOUND {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let txs: Vec<EsploraTx> = resp.error_for_status()?.json().await?;
-        let mut best: Option<(ObservedTx, u64)> = None;
+        let mut matches = Vec::new();
         for tx in txs {
-            let matches = tx
+            let received_sats: u64 = tx
                 .vout
                 .iter()
-                .any(|v| v.scriptpubkey_address.as_deref() == Some(address));
-            if !matches {
+                .filter(|v| v.scriptpubkey_address.as_deref() == Some(address))
+                .map(|v| v.value)
+                .sum();
+            if received_sats == 0 {
                 continue;
             }
             let seen_at = if tx.status.confirmed {
@@ -1293,30 +1308,15 @@ impl ChainSource for EsploraClient {
             } else {
                 None
             };
-            let candidate = ObservedTx {
+            matches.push(ObservedTx {
                 txid: tx.txid,
-                received_sats: tx
-                    .vout
-                    .iter()
-                    .filter(|v| v.scriptpubkey_address.as_deref() == Some(address))
-                    .map(|v| v.value)
-                    .sum(),
+                received_sats,
                 confirmed: tx.status.confirmed,
                 block_height: tx.status.block_height,
                 seen_at,
-            };
-            let rank = tx_rank(tx.status.confirmed, tx.status.block_height);
-            match &mut best {
-                None => best = Some((candidate, rank)),
-                Some((best_tx, best_rank)) => {
-                    if rank > *best_rank || (rank == *best_rank && is_newer(&candidate, best_tx)) {
-                        *best_tx = candidate;
-                        *best_rank = rank;
-                    }
-                }
-            }
+            });
         }
-        Ok(best.map(|(tx, _)| tx))
+        Ok(matches)
     }
 }
 
@@ -1335,73 +1335,77 @@ impl ChainSource for ElectrumChainSource {
         Ok(height)
     }
 
-    async fn first_matching_tx(&self, address: &str) -> anyhow::Result<Option<ObservedTx>> {
+    async fn matching_txs(&self, address: &str) -> anyhow::Result<Vec<ObservedTx>> {
         let parsed = Address::from_str(address)?
             .require_network(self.network)
             .context("address network mismatch")?;
         let script = parsed.script_pubkey();
         let history_script = script.clone();
         let client = self.client.clone();
-        let entry = spawn_blocking(
-            move || -> Result<Option<electrum_client::GetHistoryRes>, electrum_client::Error> {
-                let mut history = client
-                    .lock()
-                    .expect("electrum client poisoned")
-                    .script_get_history(&history_script)?;
-                Ok(history.pop())
-            },
-        )
-        .await??;
-
-        let Some(item) = entry else {
-            return Ok(None);
-        };
-        let txid = item.tx_hash;
-        let script_for_sum = script.clone();
-        let txid_for_lookup = txid;
-        let client_for_lookup = self.client.clone();
-        let received_sats = spawn_blocking(move || {
-            let guard = client_for_lookup
+        let history = spawn_blocking(move || {
+            client
                 .lock()
-                .expect("electrum client poisoned");
-            let tx = guard.transaction_get(&txid_for_lookup)?;
-            Ok::<u64, electrum_client::Error>(
-                tx.output
-                    .iter()
-                    .filter(|out| out.script_pubkey == script_for_sum)
-                    .map(|out| out.value)
-                    .sum(),
-            )
+                .expect("electrum client poisoned")
+                .script_get_history(&history_script)
         })
         .await??;
 
-        let confirmed = item.height > 0;
-        let block_height = if confirmed {
-            Some(item.height as u32)
-        } else {
-            None
-        };
-        let seen_at = if confirmed {
-            let height = item.height as usize;
-            let client = self.client.clone();
-            let header = spawn_blocking(move || {
-                client
+        let mut out = Vec::new();
+        for item in history {
+            let txid = item.tx_hash;
+            let script_for_sum = script.clone();
+            let txid_for_lookup = txid;
+            let client_for_lookup = self.client.clone();
+            let received_sats = spawn_blocking(move || {
+                let guard = client_for_lookup
                     .lock()
-                    .expect("electrum client poisoned")
-                    .block_header(height)
+                    .expect("electrum client poisoned");
+                let tx = guard.transaction_get(&txid_for_lookup)?;
+                Ok::<u64, electrum_client::Error>(
+                    tx.output
+                        .iter()
+                        .filter(|out| out.script_pubkey == script_for_sum)
+                        .map(|out| out.value)
+                        .sum(),
+                )
             })
             .await??;
-            unix_seconds_to_datetime(header.time as u64)
-        } else {
-            None
-        };
-        Ok(Some(ObservedTx {
-            txid: txid.to_string(),
-            received_sats,
-            confirmed,
-            block_height,
-            seen_at,
-        }))
+
+            if received_sats == 0 {
+                continue;
+            }
+
+            let confirmed = item.height > 0;
+            let block_height = if confirmed {
+                Some(item.height as u32)
+            } else {
+                None
+            };
+            let seen_at = if confirmed {
+                let height = item.height as usize;
+                let client = self.client.clone();
+                let header = spawn_blocking(move || {
+                    client
+                        .lock()
+                        .expect("electrum client poisoned")
+                        .block_header(height)
+                })
+                .await??;
+                unix_seconds_to_datetime(header.time as u64)
+            } else {
+                None
+            };
+
+            out.push(ObservedTx {
+                txid: txid.to_string(),
+                received_sats,
+                confirmed,
+                block_height,
+                seen_at,
+            });
+        }
+
+        Ok(out)
     }
 }
 
