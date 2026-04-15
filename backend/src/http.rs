@@ -74,6 +74,12 @@ const DEPOSIT_FLOAT_TOO_LOW_MESSAGE: &str = "Float too low, please contact opera
 const SUSPICIOUS_TOKEN_RATIO_THRESHOLD: f64 = 1.5;
 const WITHDRAWAL_BURST_WINDOW_SECS: i64 = 60;
 const WITHDRAWAL_BURST_THRESHOLD: usize = 4;
+const DEPOSIT_BURST_WINDOW_SECS: i64 = 60;
+const DEPOSIT_BURST_THRESHOLD: usize = 4;
+const SESSION_BURST_WINDOW_SECS: i64 = 300;
+const SESSION_BURST_THRESHOLD_PER_IP: usize = 6;
+const SESSION_BURST_THRESHOLD_PER_SUBNET: usize = 12;
+const MAX_GLOBAL_PENDING_DEPOSITS: u64 = 24;
 const OPERATOR_401_WINDOW_SECS: i64 = 60;
 const OPERATOR_401_THRESHOLD: usize = 20;
 const EMERGENCY_ESCALATION_WINDOW_SECS: i64 = 600;
@@ -158,6 +164,8 @@ struct PublicConfigResponse {
     float_min_ratio: f32,
     float_max_ratio: f32,
     single_request_cap_ratio: f64,
+    pending_deposit_ttl_secs: u64,
+    max_pending_deposits_per_session: u64,
     operation_mode: OperationMode,
     deposit_flow_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -208,6 +216,8 @@ async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicCon
         float_min_ratio: state.float_min_ratio,
         float_max_ratio: state.float_max_ratio,
         single_request_cap_ratio: state.single_request_cap_ratio,
+        pending_deposit_ttl_secs: state.pending_deposit_ttl_secs,
+        max_pending_deposits_per_session: state.max_pending_deposits_per_session,
         operation_mode,
         deposit_flow_enabled,
         deposit_flow_reason,
@@ -691,7 +701,51 @@ async fn export_metrics(State(state): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, headers, state.metrics.encode())
 }
 
-async fn start_session(State(state): State<AppState>) -> ApiResult<SessionStartResponse> {
+async fn start_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<SessionStartResponse> {
+    let client_hint = request_client_hint(&state, &headers);
+    let ip_burst = detect_burst("session_start", &client_hint, SESSION_BURST_WINDOW_SECS);
+    if ip_burst >= SESSION_BURST_THRESHOLD_PER_IP {
+        emit_security_alert(
+            &state,
+            "session_start_burst_detected",
+            json!({
+                "count": ip_burst,
+                "window_seconds": SESSION_BURST_WINDOW_SECS,
+                "threshold": SESSION_BURST_THRESHOLD_PER_IP,
+                "scope": "ip",
+                "client": client_hint,
+            }),
+        );
+        return Err(too_many_requests(
+            "session_rate_limited",
+            "too many new sessions from this source; please wait and try again",
+        ));
+    }
+
+    if let Some(subnet_hint) = client_subnet_hint(&client_hint) {
+        let subnet_burst = detect_burst("session_start_subnet", &subnet_hint, SESSION_BURST_WINDOW_SECS);
+        if subnet_burst >= SESSION_BURST_THRESHOLD_PER_SUBNET {
+            emit_security_alert(
+                &state,
+                "session_start_burst_detected",
+                json!({
+                    "count": subnet_burst,
+                    "window_seconds": SESSION_BURST_WINDOW_SECS,
+                    "threshold": SESSION_BURST_THRESHOLD_PER_SUBNET,
+                    "scope": "subnet",
+                    "subnet": subnet_hint,
+                }),
+            );
+            return Err(too_many_requests(
+                "session_rate_limited",
+                "session creation temporarily rate-limited for this network",
+            ));
+        }
+    }
+
     let now = Utc::now();
     let expires_at = now + state.session_ttl;
     let (token, claim_code) = generate_session_token();
@@ -781,6 +835,12 @@ async fn create_deposit(
         mode => return Err(mode_blocked(mode, "deposits")),
     }
 
+    let pending_cutoff =
+        Utc::now() - Duration::seconds(state.pending_deposit_ttl_secs as i64);
+    if let Err(err) = state.db.expire_stale_pending_deposits(pending_cutoff).await {
+        tracing::warn!(target: "backend", error = %err, "failed to expire stale pending deposits");
+    }
+
     if req.amount_sats < min_deposit_sats || req.amount_sats > MAX_DEPOSIT_SATS {
         return Err(invalid_request(format!(
             "amount_sats must be between {} and {} sats",
@@ -843,25 +903,58 @@ async fn create_deposit(
         .as_ref()
         .map(|s| s.id.clone())
         .unwrap_or_else(|| "none".to_string());
-    if let Some(count) = detect_burst(
+    let burst_count = detect_burst(
         "deposit",
         &format!("{}:{}", client_hint, session_hint),
-        WITHDRAWAL_BURST_WINDOW_SECS,
-        WITHDRAWAL_BURST_THRESHOLD,
-    ) {
+        DEPOSIT_BURST_WINDOW_SECS,
+    );
+    if burst_count >= DEPOSIT_BURST_THRESHOLD {
         emit_security_alert(
             &state,
             "deposit_burst_detected",
             json!({
-                "count": count,
-                "window_seconds": WITHDRAWAL_BURST_WINDOW_SECS,
-                "threshold": WITHDRAWAL_BURST_THRESHOLD,
+                "count": burst_count,
+                "window_seconds": DEPOSIT_BURST_WINDOW_SECS,
+                "threshold": DEPOSIT_BURST_THRESHOLD,
                 "client": client_hint,
                 "session_id": session.as_ref().map(|s| s.id.clone()),
                 "delivery_hint": req.delivery_hint,
                 "requested_amount_sats": req.amount_sats,
             }),
         );
+        return Err(too_many_requests(
+            "deposit_rate_limited",
+            "too many deposit requests in a short window; please wait and try again",
+        ));
+    }
+
+    if let Some(active_session) = session.as_ref() {
+        let pending_count = state
+            .db
+            .count_deposits_for_session_states(
+                &active_session.id,
+                &[DepositState::Pending, DepositState::Confirming],
+            )
+            .await
+            .map_err(server_error)?;
+        if pending_count >= state.max_pending_deposits_per_session {
+            return Err(too_many_requests(
+                "session_pending_deposit_limit",
+                "too many pending deposits in this session; wait for confirmations or start a new session",
+            ));
+        }
+    }
+
+    let global_pending = state
+        .db
+        .count_deposits_by_states(&[DepositState::Pending, DepositState::Confirming])
+        .await
+        .map_err(server_error)?;
+    if global_pending >= MAX_GLOBAL_PENDING_DEPOSITS {
+        return Err(too_many_requests(
+            "global_pending_deposit_limit",
+            "too many pending deposits globally; please retry shortly",
+        ));
     }
 
     let id = format!("dep_{}", Uuid::new_v4());
@@ -1015,17 +1108,17 @@ async fn request_withdrawal(
         .as_ref()
         .map(|s| s.id.clone())
         .unwrap_or_else(|| "none".to_string());
-    if let Some(count) = detect_burst(
+    let burst_count = detect_burst(
         "withdrawal",
         &format!("{}:{}", client_hint, session_hint),
         WITHDRAWAL_BURST_WINDOW_SECS,
-        WITHDRAWAL_BURST_THRESHOLD,
-    ) {
+    );
+    if burst_count == WITHDRAWAL_BURST_THRESHOLD {
         emit_security_alert(
             &state,
             "withdrawal_burst_detected",
             json!({
-                "count": count,
+                "count": burst_count,
                 "window_seconds": WITHDRAWAL_BURST_WINDOW_SECS,
                 "threshold": WITHDRAWAL_BURST_THRESHOLD,
                 "client": client_hint,
@@ -1203,7 +1296,19 @@ fn request_client_hint(state: &AppState, headers: &HeaderMap) -> String {
         .to_string()
 }
 
-fn detect_burst(scope: &str, key: &str, window_secs: i64, threshold: usize) -> Option<usize> {
+fn client_subnet_hint(client_hint: &str) -> Option<String> {
+    let mut parts = client_hint.split('.');
+    let a = parts.next()?.parse::<u8>().ok()?;
+    let b = parts.next()?.parse::<u8>().ok()?;
+    let c = parts.next()?.parse::<u8>().ok()?;
+    let _d = parts.next()?.parse::<u8>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{}.{}.{}", a, b, c))
+}
+
+fn detect_burst(scope: &str, key: &str, window_secs: i64) -> usize {
     let now = Utc::now().timestamp();
     let lower = now.saturating_sub(window_secs);
     let storage = SECURITY_WINDOW_BUCKETS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -1212,12 +1317,7 @@ fn detect_burst(scope: &str, key: &str, window_secs: i64, threshold: usize) -> O
     let entries = guard.entry(bucket_key).or_default();
     entries.retain(|ts| *ts >= lower);
     entries.push(now);
-    let count = entries.len();
-    if count == threshold {
-        Some(count)
-    } else {
-        None
-    }
+    entries.len()
 }
 
 fn emit_security_alert(state: &AppState, kind: &'static str, payload: serde_json::Value) {
@@ -2142,6 +2242,12 @@ async fn get_ledger_snapshot(
 ) -> ApiResult<LedgerSnapshotResponse> {
     require_operator_token(&state, &headers)?;
 
+    let pending_cutoff =
+        Utc::now() - Duration::seconds(state.pending_deposit_ttl_secs as i64);
+    if let Err(err) = state.db.expire_stale_pending_deposits(pending_cutoff).await {
+        tracing::warn!(target: "backend", error = %err, "failed to expire stale pending deposits");
+    }
+
     let onchain_balance = match state.onchain_wallet.as_ref() {
         Some(wallet) => Some(wallet.balance().await.map_err(server_error)?),
         None => None,
@@ -2464,17 +2570,13 @@ fn require_operator_token(
         .unwrap_or("");
     if provided != token {
         let client_hint = request_client_hint(state, headers);
-        if let Some(count) = detect_burst(
-            "operator401",
-            &client_hint,
-            OPERATOR_401_WINDOW_SECS,
-            OPERATOR_401_THRESHOLD,
-        ) {
+        let burst_count = detect_burst("operator401", &client_hint, OPERATOR_401_WINDOW_SECS);
+        if burst_count == OPERATOR_401_THRESHOLD {
             emit_security_alert(
                 state,
                 "operator_auth_401_burst",
                 json!({
-                    "count": count,
+                    "count": burst_count,
                     "window_seconds": OPERATOR_401_WINDOW_SECS,
                     "threshold": OPERATOR_401_THRESHOLD,
                     "client": client_hint,
@@ -2684,6 +2786,19 @@ fn invalid_request(message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
         StatusCode::BAD_REQUEST,
         Json(ApiError {
             code: "validation_error",
+            message: message.into(),
+        }),
+    )
+}
+
+fn too_many_requests(
+    code: &'static str,
+    message: impl Into<String>,
+) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(ApiError {
+            code,
             message: message.into(),
         }),
     )

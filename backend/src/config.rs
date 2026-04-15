@@ -27,6 +27,8 @@ const DEFAULT_WITHDRAWAL_MIN_SATS: u64 = 50_000;
 const DEFAULT_WITHDRAWAL_FEE_BUFFER_SATS: u64 = 500;
 const DEFAULT_FLOAT_DRIFT_ALERT_RATIO: f32 = 0.1;
 const DEFAULT_SINGLE_REQUEST_RATIO: f64 = 0.5;
+const DEFAULT_PENDING_DEPOSIT_TTL_SECS: u64 = 600;
+const DEFAULT_MAX_PENDING_DEPOSITS_PER_SESSION: u64 = 2;
 
 #[derive(Clone)]
 pub struct AppConfig {
@@ -62,6 +64,8 @@ pub struct AppConfig {
     pub withdrawal_fee_buffer_sats: u64,
     pub float_drift_alert_ratio: f32,
     pub single_request_cap_ratio: f64,
+    pub pending_deposit_ttl_secs: u64,
+    pub max_pending_deposits_per_session: u64,
     pub float_alert_webhook_url: Option<String>,
     pub transaction_webhook_url: Option<String>,
     pub security_alert_webhook_url: Option<String>,
@@ -262,6 +266,17 @@ impl AppConfig {
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|v| (0.0..=1.0).contains(v))
             .unwrap_or(DEFAULT_SINGLE_REQUEST_RATIO);
+        let pending_deposit_ttl_secs = std::env::var("PENDING_DEPOSIT_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_PENDING_DEPOSIT_TTL_SECS);
+        let max_pending_deposits_per_session =
+            std::env::var("MAX_PENDING_DEPOSITS_PER_SESSION")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(DEFAULT_MAX_PENDING_DEPOSITS_PER_SESSION);
         let float_alert_webhook_url = std::env::var("FLOAT_ALERT_WEBHOOK_URL").ok();
         let transaction_webhook_url = std::env::var("TRANSACTION_WEBHOOK_URL").ok();
         let security_alert_webhook_url = std::env::var("SECURITY_ALERT_WEBHOOK_URL").ok();
@@ -341,6 +356,8 @@ impl AppConfig {
             withdrawal_fee_buffer_sats,
             float_drift_alert_ratio,
             single_request_cap_ratio,
+            pending_deposit_ttl_secs,
+            max_pending_deposits_per_session,
             float_alert_webhook_url,
             transaction_webhook_url,
             security_alert_webhook_url,
