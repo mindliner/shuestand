@@ -604,7 +604,7 @@ impl Database {
 
     pub async fn list_open_deposits(&self) -> Result<Vec<Deposit>, Error> {
         let sql = format!(
-            "SELECT {} FROM deposits WHERE state IN ('pending', 'confirming')",
+            "SELECT {} FROM deposits WHERE state IN ('pending', 'partial_payment_received', 'confirming')",
             DEPOSIT_SELECT_FIELDS
         );
         let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
@@ -790,13 +790,13 @@ impl Database {
                 updated_at = $2,
                 mint_error = 'expired_pending_timeout',
                 delivery_error = NULL
-            WHERE state = $3
-              AND confirmations = 0
-              AND created_at <= $4"#,
+            WHERE state IN ($3, $4)
+              AND created_at <= $5"#,
         )
         .bind(DepositState::Failed.as_str())
         .bind(&now)
         .bind(DepositState::Pending.as_str())
+        .bind(DepositState::PartialPaymentReceived.as_str())
         .bind(cutoff.to_rfc3339())
         .execute(&self.pool)
         .await?;
@@ -1074,7 +1074,7 @@ impl Database {
         let total = sqlx::query_scalar::<_, i64>(
             r#"SELECT COALESCE(SUM(amount_sats), 0)::BIGINT
                FROM deposits
-               WHERE state IN ('confirming', 'minting', 'delivering', 'ready')"#,
+               WHERE state IN ('partial_payment_received', 'confirming', 'minting', 'delivering', 'ready')"#,
         )
         .fetch_one(&self.pool)
         .await?;
@@ -1200,6 +1200,7 @@ pub struct Session {
 #[serde(rename_all = "snake_case")]
 pub enum DepositState {
     Pending,
+    PartialPaymentReceived,
     Confirming,
     Minting,
     Delivering,
@@ -1213,6 +1214,7 @@ impl DepositState {
     pub fn as_str(&self) -> &'static str {
         match self {
             DepositState::Pending => "pending",
+            DepositState::PartialPaymentReceived => "partial_payment_received",
             DepositState::Confirming => "confirming",
             DepositState::Minting => "minting",
             DepositState::Delivering => "delivering",
@@ -1230,6 +1232,7 @@ impl TryFrom<&str> for DepositState {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "pending" => Ok(DepositState::Pending),
+            "partial_payment_received" => Ok(DepositState::PartialPaymentReceived),
             "confirming" => Ok(DepositState::Confirming),
             "minting" => Ok(DepositState::Minting),
             "delivering" => Ok(DepositState::Delivering),

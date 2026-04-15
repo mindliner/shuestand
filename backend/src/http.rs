@@ -59,8 +59,9 @@ const DEFAULT_WITHDRAWAL_STATES: [WithdrawalState; 5] = [
     WithdrawalState::Confirming,
     WithdrawalState::Failed,
 ];
-const DEFAULT_DEPOSIT_STATES: [DepositState; 6] = [
+const DEFAULT_DEPOSIT_STATES: [DepositState; 7] = [
     DepositState::Pending,
+    DepositState::PartialPaymentReceived,
     DepositState::Confirming,
     DepositState::Minting,
     DepositState::Delivering,
@@ -847,6 +848,16 @@ async fn create_deposit(
             min_deposit_sats, MAX_DEPOSIT_SATS
         )));
     }
+    if req
+        .delivery_hint
+        .as_ref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return Err(invalid_request(
+            "delivery_hint is disabled for public deposits; use pickup_token flow",
+        ));
+    }
 
     let cashu_wallet = state
         .cashu_wallet
@@ -933,7 +944,11 @@ async fn create_deposit(
             .db
             .count_deposits_for_session_states(
                 &active_session.id,
-                &[DepositState::Pending, DepositState::Confirming],
+                &[
+                    DepositState::Pending,
+                    DepositState::PartialPaymentReceived,
+                    DepositState::Confirming,
+                ],
             )
             .await
             .map_err(server_error)?;
@@ -947,7 +962,11 @@ async fn create_deposit(
 
     let global_pending = state
         .db
-        .count_deposits_by_states(&[DepositState::Pending, DepositState::Confirming])
+        .count_deposits_by_states(&[
+            DepositState::Pending,
+            DepositState::PartialPaymentReceived,
+            DepositState::Confirming,
+        ])
         .await
         .map_err(server_error)?;
     if global_pending >= MAX_GLOBAL_PENDING_DEPOSITS {
@@ -973,7 +992,7 @@ async fn create_deposit(
         state: DepositState::Pending,
         address: assigned.address,
         target_confirmations: state.deposit_target_confirmations,
-        delivery_hint: req.delivery_hint,
+        delivery_hint: None,
         metadata: req.metadata,
         txid: None,
         confirmations: 0,
@@ -2285,7 +2304,11 @@ async fn get_ledger_snapshot(
 
     let deposits_pending = sum_deposit_states(
         &deposit_rows,
-        &[DepositState::Pending, DepositState::Confirming],
+        &[
+            DepositState::Pending,
+            DepositState::PartialPaymentReceived,
+            DepositState::Confirming,
+        ],
     );
     let deposits_minting = sum_deposit_states(
         &deposit_rows,

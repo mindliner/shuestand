@@ -1,5 +1,6 @@
 export type DepositState =
   | 'pending'
+  | 'partial_payment_received'
   | 'confirming'
   | 'minting'
   | 'delivering'
