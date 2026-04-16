@@ -16,6 +16,7 @@ interface DepositStatusCardProps {
   error: Error | null
   isLoading: boolean
   hasSubmission: boolean
+  pendingDepositTtlSecs?: number
   pickupToken?: string | null
   revealedToken?: string | null
   onPickup?: () => void
@@ -36,6 +37,7 @@ export function DepositStatusCard({
   error,
   isLoading,
   hasSubmission,
+  pendingDepositTtlSecs = 600,
   pickupToken,
   revealedToken,
   onPickup,
@@ -45,6 +47,7 @@ export function DepositStatusCard({
 }: DepositStatusCardProps) {
   const previousDepositId = useRef<string | null>(null)
   const previousDepositState = useRef<DepositState | null>(null)
+  const [nowMs, setNowMs] = useState(() => Date.now())
 
   useEffect(() => {
     if (!deposit) {
@@ -65,6 +68,18 @@ export function DepositStatusCard({
     previousDepositId.current = deposit.id
     previousDepositState.current = deposit.state
   }, [deposit])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+    const handle = window.setInterval(() => {
+      setNowMs(Date.now())
+    }, 1000)
+    return () => {
+      window.clearInterval(handle)
+    }
+  }, [])
 
   if (!hasSubmission) {
     return (
@@ -106,6 +121,8 @@ export function DepositStatusCard({
   const canRenderStaticPickupQr = Boolean(
     revealedToken && revealedToken.length <= maxStaticQrChars
   )
+  const topUpWindow = getTopUpWindow(deposit, pendingDepositTtlSecs, nowMs)
+  const remainingTopUpSats = Math.max(0, deposit.amount_sats - (deposit.received_sats ?? 0))
 
   return (
     <div className="status-block">
@@ -124,9 +141,19 @@ export function DepositStatusCard({
       </p>
       {deposit.state === 'partial_payment_received' && (
         <p className="status-error">
-          Partial payment received. Send the remaining sats to this same address, then wait for confirmations.
+          Partial payment received. Send the remaining {remainingTopUpSats.toLocaleString()} sats to this same address, then wait for confirmations.
         </p>
       )}
+      {topUpWindow &&
+        (topUpWindow.expired ? (
+          <p className="status-meta warning">
+            Top-up window expired. This deposit will be marked failed automatically.
+          </p>
+        ) : (
+          <p className="status-meta warning">
+            Top-up window: {topUpWindow.label} remaining.
+          </p>
+        ))}
       {confirmationEtaText && (
         <p className="status-meta">
           Estimated time to mint: {confirmationEtaText}. We'll notify this device when the token is ready.
@@ -389,6 +416,47 @@ const getConfirmationEtaText = (deposit: Deposit): string | null => {
 
   const days = hours / 24
   return `≈ ${days.toFixed(1)} d`
+}
+
+const getTopUpWindow = (
+  deposit: Deposit,
+  ttlSecs: number,
+  nowMs: number
+): { expired: boolean; label: string } | null => {
+  if (!Number.isFinite(ttlSecs) || ttlSecs <= 0) {
+    return null
+  }
+  if (deposit.state !== 'pending' && deposit.state !== 'partial_payment_received') {
+    return null
+  }
+  if (!deposit.created_at) {
+    return null
+  }
+  const createdAtMs = Date.parse(deposit.created_at)
+  if (!Number.isFinite(createdAtMs)) {
+    return null
+  }
+
+  const remainingSecs = Math.ceil((createdAtMs + ttlSecs * 1000 - nowMs) / 1000)
+  if (remainingSecs <= 0) {
+    return { expired: true, label: '0s' }
+  }
+
+  return {
+    expired: false,
+    label: formatRemaining(remainingSecs),
+  }
+}
+
+const formatRemaining = (totalSeconds: number): string => {
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`
+  }
+  return `${minutes}m ${String(seconds).padStart(2, '0')}s`
 }
 
 const notifyDepositReady = () => {

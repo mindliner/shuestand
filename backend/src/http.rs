@@ -660,6 +660,7 @@ struct FloatStatusResponse {
     cashu: WalletFloatStatusPayload,
     total_balance_sats: u64,
     drift_sats: i64,
+    drift_label: &'static str,
 }
 
 #[derive(Serialize)]
@@ -989,6 +990,7 @@ async fn create_deposit(
     let deposit = Deposit {
         id: id.clone(),
         amount_sats: req.amount_sats,
+        received_sats: 0,
         state: DepositState::Pending,
         address: assigned.address,
         target_confirmations: state.deposit_target_confirmations,
@@ -2449,6 +2451,13 @@ async fn get_float_status(
     let snapshot = state.float_status.read().await.clone();
     let total_balance = snapshot.onchain.balance_sats + snapshot.cashu.balance_sats;
     let drift = state.float_target_sats as i64 - total_balance as i64;
+    let drift_label = if drift > 0 {
+        "deficit"
+    } else if drift < 0 {
+        "surplus"
+    } else {
+        "balanced"
+    };
 
     Ok(Json(ApiResponse {
         data: FloatStatusResponse {
@@ -2459,6 +2468,7 @@ async fn get_float_status(
             cashu: WalletFloatStatusPayload::from(&snapshot.cashu),
             total_balance_sats: total_balance,
             drift_sats: drift,
+            drift_label,
         },
     }))
 }

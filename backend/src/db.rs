@@ -10,7 +10,7 @@ use sqlx::{
 };
 use std::str::FromStr;
 
-const DEPOSIT_SELECT_FIELDS: &str = "id, amount_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, minted_token, minted_amount_sats, token_ready_at, mint_attempt_count, last_mint_attempt_at, mint_error, delivery_attempt_count, last_delivery_attempt_at, delivery_error, pickup_token, pickup_revealed_at, session_id, transaction_counted_at";
+const DEPOSIT_SELECT_FIELDS: &str = "id, amount_sats, received_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, minted_token, minted_amount_sats, token_ready_at, mint_attempt_count, last_mint_attempt_at, mint_error, delivery_attempt_count, last_delivery_attempt_at, delivery_error, pickup_token, pickup_revealed_at, session_id, transaction_counted_at";
 const TRANSACTION_COUNTER_KEY: &str = "transaction_counter";
 
 #[derive(Clone)]
@@ -105,11 +105,12 @@ impl Database {
     pub async fn insert_deposit(&self, deposit: &Deposit) -> Result<(), Error> {
         sqlx::query(
             r#"INSERT INTO deposits
-            (id, amount_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, pickup_token, pickup_revealed_at, session_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#,
+            (id, amount_sats, received_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, pickup_token, pickup_revealed_at, session_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#,
         )
         .bind(&deposit.id)
         .bind(deposit.amount_sats as i64)
+        .bind(deposit.received_sats as i64)
         .bind(deposit.state.as_str())
         .bind(&deposit.address)
         .bind(deposit.target_confirmations as i32)
@@ -156,6 +157,7 @@ impl Database {
         Ok(Deposit {
             id: row.try_get("id")?,
             amount_sats: row.try_get::<i64, _>("amount_sats")? as u64,
+            received_sats: row.try_get::<i64, _>("received_sats")? as u64,
             state: parsed_state,
             address: row.try_get("address")?,
             target_confirmations: row.try_get::<i32, _>("target_confirmations")? as u8,
@@ -616,6 +618,8 @@ impl Database {
         &self,
         deposit_id: &str,
         txid: &str,
+        received_sats: u64,
+        confirmed_covering_sats: u64,
         confirmations: u32,
         state: DepositState,
     ) -> Result<(), Error> {
@@ -623,15 +627,22 @@ impl Database {
         sqlx::query(
             r#"UPDATE deposits
             SET txid = COALESCE(txid, $1),
-                confirmations = $2,
-                state = $3,
-                last_checked_at = $4,
-                updated_at = $5
-            WHERE id = $6"#,
+                received_sats = GREATEST(received_sats, $2),
+                amount_sats = CASE
+                    WHEN $4 = 'minting' THEN GREATEST(amount_sats, $3)
+                    ELSE amount_sats
+                END,
+                confirmations = $5,
+                state = $4,
+                last_checked_at = $6,
+                updated_at = $7
+            WHERE id = $8"#,
         )
         .bind(txid)
-        .bind(confirmations as i32)
+        .bind(received_sats as i64)
+        .bind(confirmed_covering_sats as i64)
         .bind(state.as_str())
+        .bind(confirmations as i32)
         .bind(&now)
         .bind(&now)
         .bind(deposit_id)
@@ -1249,6 +1260,7 @@ impl TryFrom<&str> for DepositState {
 pub struct Deposit {
     pub id: String,
     pub amount_sats: u64,
+    pub received_sats: u64,
     pub state: DepositState,
     pub address: String,
     pub target_confirmations: u8,

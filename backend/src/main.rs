@@ -554,6 +554,14 @@ async fn main() -> Result<(), anyhow::Error> {
         tracing::info!(target: "backend", "deposit worker disabled via config");
     }
 
+    if config.pending_deposit_ttl_secs > 0 {
+        let expiry_db = db.clone();
+        let ttl_secs = config.pending_deposit_ttl_secs;
+        tokio::spawn(async move {
+            expire_stale_pending_loop(expiry_db, ttl_secs).await;
+        });
+    }
+
     if let Some(wallet) = onchain_wallet.clone() {
         let watcher_db = db.clone();
         let poll_every = config.confirmation_poll_interval;
@@ -867,6 +875,34 @@ async fn monitor_float_levels(
     }
 }
 
+async fn expire_stale_pending_loop(db: Database, ttl_secs: u64) {
+    let sweep_secs = (ttl_secs / 6).clamp(5, 60);
+    let sweep_interval = Duration::from_secs(sweep_secs);
+
+    loop {
+        let cutoff = Utc::now() - ChronoDuration::seconds(ttl_secs as i64);
+        match db.expire_stale_pending_deposits(cutoff).await {
+            Ok(expired) if expired > 0 => {
+                tracing::info!(
+                    target: "backend",
+                    expired,
+                    ttl_secs,
+                    "expired stale pending/partial deposits"
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    target: "backend",
+                    error = %err,
+                    "stale pending expiry sweep failed"
+                );
+            }
+        }
+        sleep(sweep_interval).await;
+    }
+}
+
 async fn compute_onchain_float(
     wallet: Option<&Arc<OnchainWallet>>,
     target_sats: u64,
@@ -1017,12 +1053,22 @@ async fn emit_float_drift_alert(
     delta_sats: i64,
     previous_total_sats: u64,
 ) -> Result<(), reqwest::Error> {
+    let drift_label = if drift_sats > 0 {
+        "deficit"
+    } else if drift_sats < 0 {
+        "surplus"
+    } else {
+        "balanced"
+    };
+
     let payload = json!({
         "event": "float_drift_alert",
         "state": state,
         "total_balance_sats": total_balance_sats,
         "target_sats": target_sats,
         "drift_sats": drift_sats,
+        "drift_abs_sats": drift_sats.unsigned_abs(),
+        "drift_label": drift_label,
         "delta_sats": delta_sats,
         "previous_total_sats": previous_total_sats,
     });
@@ -1130,8 +1176,15 @@ async fn process_confirmations(db: &Database, chain: &dyn ChainSource) -> Result
             (DepositState::Confirming, best_confirmations)
         };
 
-        db.update_deposit_chain_state(&deposit.id, display_txid, confirmations, next_state)
-            .await?;
+        db.update_deposit_chain_state(
+            &deposit.id,
+            display_txid,
+            total_received,
+            confirmed_covering_amount,
+            confirmations,
+            next_state,
+        )
+        .await?;
         db.update_address_observation(&deposit.id, display_txid, confirmations)
             .await?;
     }
