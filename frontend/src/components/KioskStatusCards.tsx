@@ -122,6 +122,7 @@ export function DepositStatusCard({
     revealedToken && revealedToken.length <= maxStaticQrChars
   )
   const topUpWindow = getTopUpWindow(deposit, pendingDepositTtlSecs, nowMs)
+  const remainingTopUpSats = Math.max(0, deposit.amount_sats - (deposit.received_sats ?? 0))
 
   return (
     <div className="status-block">
@@ -140,7 +141,7 @@ export function DepositStatusCard({
       </p>
       {deposit.state === 'partial_payment_received' && (
         <p className="status-error">
-          Partial payment received. Send the remaining sats to this same address, then wait for confirmations.
+          Partial payment received. Send the remaining {remainingTopUpSats.toLocaleString()} sats to this same address, then wait for confirmations.
         </p>
       )}
       {topUpWindow &&

@@ -12,6 +12,7 @@ export type DepositState =
 export interface Deposit {
   id: string
   amount_sats: number
+  received_sats?: number
   state: DepositState
   address: string
   target_confirmations: number

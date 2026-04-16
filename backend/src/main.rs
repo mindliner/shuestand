@@ -1166,8 +1166,14 @@ async fn process_confirmations(db: &Database, chain: &dyn ChainSource) -> Result
             (DepositState::Confirming, best_confirmations)
         };
 
-        db.update_deposit_chain_state(&deposit.id, display_txid, confirmations, next_state)
-            .await?;
+        db.update_deposit_chain_state(
+            &deposit.id,
+            display_txid,
+            total_received,
+            confirmations,
+            next_state,
+        )
+        .await?;
         db.update_address_observation(&deposit.id, display_txid, confirmations)
             .await?;
     }

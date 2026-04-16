@@ -989,6 +989,7 @@ async fn create_deposit(
     let deposit = Deposit {
         id: id.clone(),
         amount_sats: req.amount_sats,
+        received_sats: 0,
         state: DepositState::Pending,
         address: assigned.address,
         target_confirmations: state.deposit_target_confirmations,
