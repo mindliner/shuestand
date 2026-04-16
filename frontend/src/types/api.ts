@@ -205,12 +205,15 @@ export interface FloatStatusResponse {
 
 export interface PublicConfigResponse {
   withdrawal_min_sats: number
+  withdrawal_fee_buffer_sats?: number
   deposit_min_sats: number
   deposit_target_confirmations: number
   float_target_sats: number
   float_min_ratio: number
   float_max_ratio: number
   single_request_cap_ratio: number
+  pending_deposit_ttl_secs?: number
+  max_pending_deposits_per_session?: number
   operation_mode?: OperationMode
   deposit_flow_enabled: boolean
   deposit_flow_reason?: string | null

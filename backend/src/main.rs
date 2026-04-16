@@ -554,6 +554,14 @@ async fn main() -> Result<(), anyhow::Error> {
         tracing::info!(target: "backend", "deposit worker disabled via config");
     }
 
+    if config.pending_deposit_ttl_secs > 0 {
+        let expiry_db = db.clone();
+        let ttl_secs = config.pending_deposit_ttl_secs;
+        tokio::spawn(async move {
+            expire_stale_pending_loop(expiry_db, ttl_secs).await;
+        });
+    }
+
     if let Some(wallet) = onchain_wallet.clone() {
         let watcher_db = db.clone();
         let poll_every = config.confirmation_poll_interval;
@@ -864,6 +872,34 @@ async fn monitor_float_levels(
         }
 
         sleep(interval).await;
+    }
+}
+
+async fn expire_stale_pending_loop(db: Database, ttl_secs: u64) {
+    let sweep_secs = (ttl_secs / 6).clamp(5, 60);
+    let sweep_interval = Duration::from_secs(sweep_secs);
+
+    loop {
+        let cutoff = Utc::now() - ChronoDuration::seconds(ttl_secs as i64);
+        match db.expire_stale_pending_deposits(cutoff).await {
+            Ok(expired) if expired > 0 => {
+                tracing::info!(
+                    target: "backend",
+                    expired,
+                    ttl_secs,
+                    "expired stale pending/partial deposits"
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    target: "backend",
+                    error = %err,
+                    "stale pending expiry sweep failed"
+                );
+            }
+        }
+        sleep(sweep_interval).await;
     }
 }
 

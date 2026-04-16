@@ -106,6 +106,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   const [limits, setLimits] = useState(() => ({
     withdrawalMinSats: config.withdrawalMinSats,
     depositMinSats: config.depositMinSats,
+    pendingDepositTtlSecs: 600,
     depositFlowEnabled: true,
     depositFlowReason: null as string | null,
     operationMode: 'normal' as OperationMode,
@@ -241,6 +242,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
         const depositMin = Number(runtime.deposit_min_sats)
         const resolvedDepositMin =
           Number.isFinite(depositMin) && depositMin > 0 ? depositMin : undefined
+        const pendingTtl = Number(runtime.pending_deposit_ttl_secs)
+        const resolvedPendingTtl =
+          Number.isFinite(pendingTtl) && pendingTtl > 0 ? pendingTtl : undefined
         const depositFlowEnabled = runtime.deposit_flow_enabled !== false
         const depositFlowReason = runtime.deposit_flow_reason ?? null
         const operationMode = runtime.operation_mode ?? 'normal'
@@ -250,6 +254,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           const next = {
             withdrawalMinSats: resolvedMin ?? current.withdrawalMinSats,
             depositMinSats: resolvedDepositMin ?? current.depositMinSats,
+            pendingDepositTtlSecs: resolvedPendingTtl ?? current.pendingDepositTtlSecs,
             depositFlowEnabled,
             depositFlowReason,
             operationMode,
@@ -258,6 +263,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           if (
             next.withdrawalMinSats === current.withdrawalMinSats &&
             next.depositMinSats === current.depositMinSats &&
+            next.pendingDepositTtlSecs === current.pendingDepositTtlSecs &&
             next.depositFlowEnabled === current.depositFlowEnabled &&
             next.depositFlowReason === current.depositFlowReason &&
             next.operationMode === current.operationMode &&
@@ -1186,6 +1192,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                     error={normalizeError(depositError)}
                     isLoading={depositLoading}
                     hasSubmission={Boolean(selectedDepositId)}
+                    pendingDepositTtlSecs={limits.pendingDepositTtlSecs}
                     pickupToken={selectedDeposit?.pickupToken ?? null}
                     revealedToken={selectedDepositId ? revealedTokens[selectedDepositId] ?? null : null}
                     onPickup={handleDepositPickup}
