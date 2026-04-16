@@ -114,7 +114,6 @@ export function OperatorPanel() {
   const [activeQuoteId, setActiveQuoteId] = useState<string | null>(null)
   const [cashuPayoutAmount, setCashuPayoutAmount] = useState('')
   const [cashuTokenOutput, setCashuTokenOutput] = useState<string | null>(null)
-  const [equalizeHint, setEqualizeHint] = useState<string | null>(null)
 
   const [cleanupNotes, setCleanupNotes] = useState<Record<string, string>>({})
   const [cleanupTxids, setCleanupTxids] = useState<Record<string, string>>({})
@@ -376,10 +375,9 @@ export function OperatorPanel() {
     }
   }, [floatStatus])
 
-  const handleEqualize = () => {
+  const rebalanceRecommendation = useMemo(() => {
     if (!floatStatus) {
-      setEqualizeHint('Float status not available yet.')
-      return
+      return 'Float status not available yet.'
     }
 
     const target = floatStatus.target_sats
@@ -387,30 +385,21 @@ export function OperatorPanel() {
     const cashuDelta = floatStatus.cashu.balance_sats - target
 
     if (onchainDelta === 0 && cashuDelta === 0) {
-      setEqualizeHint('Already exactly on target for both floats.')
-      return
+      return 'Already exactly on target for both floats.'
     }
 
     if (onchainDelta > 0 && cashuDelta < 0) {
       const amount = Math.min(onchainDelta, Math.abs(cashuDelta))
-      setEqualizeHint(
-        `Suggested move: ${formatSats(amount)} sats from Onchain to Cashu (manual rebalance step).`
-      )
-      return
+      return `Suggested move: ${formatSats(amount)} sats from Onchain to Cashu (manual rebalance step).`
     }
 
     if (cashuDelta > 0 && onchainDelta < 0) {
       const amount = Math.min(cashuDelta, Math.abs(onchainDelta))
-      setEqualizeHint(
-        `Suggested move: ${formatSats(amount)} sats from Cashu to Onchain (manual rebalance step).`
-      )
-      return
+      return `Suggested move: ${formatSats(amount)} sats from Cashu to Onchain (manual rebalance step).`
     }
 
-    setEqualizeHint(
-      'Both floats are on the same side of target (both surplus or both deficit). Automatic equalize is not available for this case.'
-    )
-  }
+    return 'Both floats are on the same side of target (both surplus or both deficit). No direct equalization path is available.'
+  }, [floatStatus])
 
   const handleSaveToken = () => {
     const trimmed = tokenInput.trim()
@@ -1020,10 +1009,9 @@ export function OperatorPanel() {
                   <p className="status-meta">Target: {formatSats(floatBars.target)} sats</p>
                 </>
               )}
-              <button type="button" onClick={handleEqualize} disabled={!floatStatus}>
-                Equalize
-              </button>
-              {equalizeHint && <p className="status-meta">{equalizeHint}</p>}
+              <p className="status-meta">
+                Rebalancing recommendation: {rebalanceRecommendation}
+              </p>
             </section>
 
             <div className="section-heading">
