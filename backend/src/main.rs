@@ -1170,6 +1170,7 @@ async fn process_confirmations(db: &Database, chain: &dyn ChainSource) -> Result
             &deposit.id,
             display_txid,
             total_received,
+            confirmed_covering_amount,
             confirmations,
             next_state,
         )

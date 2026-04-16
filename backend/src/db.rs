@@ -619,6 +619,7 @@ impl Database {
         deposit_id: &str,
         txid: &str,
         received_sats: u64,
+        confirmed_covering_sats: u64,
         confirmations: u32,
         state: DepositState,
     ) -> Result<(), Error> {
@@ -627,16 +628,21 @@ impl Database {
             r#"UPDATE deposits
             SET txid = COALESCE(txid, $1),
                 received_sats = GREATEST(received_sats, $2),
-                confirmations = $3,
+                amount_sats = CASE
+                    WHEN $4 = 'minting' THEN GREATEST(amount_sats, $3)
+                    ELSE amount_sats
+                END,
+                confirmations = $5,
                 state = $4,
-                last_checked_at = $5,
-                updated_at = $6
-            WHERE id = $7"#,
+                last_checked_at = $6,
+                updated_at = $7
+            WHERE id = $8"#,
         )
         .bind(txid)
         .bind(received_sats as i64)
-        .bind(confirmations as i32)
+        .bind(confirmed_covering_sats as i64)
         .bind(state.as_str())
+        .bind(confirmations as i32)
         .bind(&now)
         .bind(&now)
         .bind(deposit_id)
