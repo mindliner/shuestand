@@ -1053,12 +1053,22 @@ async fn emit_float_drift_alert(
     delta_sats: i64,
     previous_total_sats: u64,
 ) -> Result<(), reqwest::Error> {
+    let drift_label = if drift_sats > 0 {
+        "deficit"
+    } else if drift_sats < 0 {
+        "surplus"
+    } else {
+        "balanced"
+    };
+
     let payload = json!({
         "event": "float_drift_alert",
         "state": state,
         "total_balance_sats": total_balance_sats,
         "target_sats": target_sats,
         "drift_sats": drift_sats,
+        "drift_abs_sats": drift_sats.unsigned_abs(),
+        "drift_label": drift_label,
         "delta_sats": delta_sats,
         "previous_total_sats": previous_total_sats,
     });
