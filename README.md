@@ -105,7 +105,7 @@ When the Docker stack lives on an internal host (e.g., `vm-docker:8872`), expose
 
 ## Operator Guidance
 
-For full environment setup + tuning (grouped exactly like `infra/docker/backend.env.example`), see:
+For full environment setup + tuning (grouped exactly like `infra/docker/backend.env.example`, including small/medium/high throughput presets), see:
 - `docs/ENVIRONMENT_SETUP_AND_TUNING.md`
 
 ### Liquidity Tuning Guidelines

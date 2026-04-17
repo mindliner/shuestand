@@ -216,6 +216,53 @@ Tuning guidance:
 
 ---
 
+## Preset profiles (small / medium / high throughput)
+
+Use these as starting points, then adjust from live data.
+
+### Small (single kiosk, low concurrency)
+- `FLOAT_TARGET_SATS=500000`
+- `SINGLE_REQUEST_CAP_RATIO=0.15`
+- `PENDING_DEPOSIT_TTL_SECS=600`
+- `MAX_PENDING_DEPOSITS_PER_SESSION=2`
+- `ADDRESS_POOL_TARGET=20`
+- `DEPOSIT_TARGET_CONFIRMATIONS=2`
+- `WITHDRAWAL_WORKER_INTERVAL_SECS=15`
+- `DEPOSIT_WORKER_INTERVAL_SECS=10`
+
+Capacity intuition: about 75k sats max per request.
+
+### Medium (multiple kiosks, moderate concurrency)
+- `FLOAT_TARGET_SATS=2000000`
+- `SINGLE_REQUEST_CAP_RATIO=0.12`
+- `PENDING_DEPOSIT_TTL_SECS=480`
+- `MAX_PENDING_DEPOSITS_PER_SESSION=2`
+- `ADDRESS_POOL_TARGET=50`
+- `DEPOSIT_TARGET_CONFIRMATIONS=2`
+- `WITHDRAWAL_WORKER_INTERVAL_SECS=12`
+- `DEPOSIT_WORKER_INTERVAL_SECS=8`
+
+Capacity intuition: about 240k sats max per request.
+
+### High (event/peak traffic, strong operator monitoring)
+- `FLOAT_TARGET_SATS=5000000`
+- `SINGLE_REQUEST_CAP_RATIO=0.10`
+- `PENDING_DEPOSIT_TTL_SECS=360`
+- `MAX_PENDING_DEPOSITS_PER_SESSION=1`
+- `ADDRESS_POOL_TARGET=120`
+- `DEPOSIT_TARGET_CONFIRMATIONS=2` (or `3` for stricter finality)
+- `WITHDRAWAL_WORKER_INTERVAL_SECS=10`
+- `DEPOSIT_WORKER_INTERVAL_SECS=6`
+
+Capacity intuition: about 500k sats max per request.
+
+### How to choose quickly
+- If you value abuse resistance over convenience, lower `SINGLE_REQUEST_CAP_RATIO` and shorter `PENDING_DEPOSIT_TTL_SECS`.
+- If users frequently queue behind address generation, raise `ADDRESS_POOL_TARGET`.
+- If chain fees/latency are unstable, keep worker intervals conservative and avoid over-tight polling.
+
+---
+
 ## Change management checklist
 
 Before changing env in production:
