@@ -357,6 +357,50 @@ export function OperatorPanel() {
   const ledgerSnapshot = ledgerQuery.data
   const ledgerCapturedAt = ledgerSnapshot ? new Date(ledgerSnapshot.captured_at) : null
 
+  const floatBars = useMemo(() => {
+    if (!floatStatus) {
+      return null
+    }
+    const target = floatStatus.target_sats
+    const onchain = floatStatus.onchain.balance_sats
+    const cashu = floatStatus.cashu.balance_sats
+    const max = Math.max(target, onchain, cashu, 1)
+    return {
+      target,
+      targetPct: (target / max) * 100,
+      rows: [
+        { key: 'onchain', label: 'Onchain', value: onchain, pct: (onchain / max) * 100 },
+        { key: 'cashu', label: 'Cashu', value: cashu, pct: (cashu / max) * 100 },
+      ],
+    }
+  }, [floatStatus])
+
+  const rebalanceRecommendation = useMemo(() => {
+    if (!floatStatus) {
+      return 'Float status not available yet.'
+    }
+
+    const target = floatStatus.target_sats
+    const onchainDelta = floatStatus.onchain.balance_sats - target
+    const cashuDelta = floatStatus.cashu.balance_sats - target
+
+    if (onchainDelta === 0 && cashuDelta === 0) {
+      return 'Already exactly on target for both floats.'
+    }
+
+    if (onchainDelta > 0 && cashuDelta < 0) {
+      const amount = Math.min(onchainDelta, Math.abs(cashuDelta))
+      return `Suggested move: ${formatSats(amount)} sats from Onchain to Cashu (manual rebalance step).`
+    }
+
+    if (cashuDelta > 0 && onchainDelta < 0) {
+      const amount = Math.min(cashuDelta, Math.abs(onchainDelta))
+      return `Suggested move: ${formatSats(amount)} sats from Cashu to Onchain (manual rebalance step).`
+    }
+
+    return 'Both floats are on the same side of target (both surplus or both deficit). No direct equalization path is available.'
+  }, [floatStatus])
+
   const handleSaveToken = () => {
     const trimmed = tokenInput.trim()
     setToken(trimmed)
@@ -936,6 +980,40 @@ export function OperatorPanel() {
           </section>
 
           <div className="operator-section">
+            <div className="section-heading">
+              <h2>Float overview</h2>
+            </div>
+            <section className="operator-card float-overview-card">
+              {floatStatusQuery.isLoading ? (
+                <p>Loading…</p>
+              ) : !floatBars ? (
+                <p className="status-error">Float status unavailable.</p>
+              ) : (
+                <>
+                  {floatBars.rows.map((row) => (
+                    <div key={row.key} className="float-row">
+                      <div className="float-row-head">
+                        <strong>{row.label}</strong>
+                        <span>{formatSats(row.value)} sats</span>
+                      </div>
+                      <div className="float-bar-track" role="img" aria-label={`${row.label} float bar`}>
+                        <div className="float-bar-fill" style={{ width: `${Math.min(100, row.pct)}%` }} />
+                        <div
+                          className="float-target-marker"
+                          style={{ left: `${Math.min(100, Math.max(0, floatBars.targetPct))}%` }}
+                          title={`Target ${formatSats(floatBars.target)} sats`}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                  <p className="status-meta">Target: {formatSats(floatBars.target)} sats</p>
+                </>
+              )}
+              <p className="status-meta">
+                Rebalancing recommendation: {rebalanceRecommendation}
+              </p>
+            </section>
+
             <div className="section-heading">
               <h2>Onchain</h2>
               {renderFloatBadge(floatStatus?.onchain)}

@@ -38,7 +38,7 @@ Shuestand ties those two halves together. It keeps Lightning behind the curtain,
 git clone https://github.com/mindliner/shuestand.git
 cd infra/docker/
 cp backend.env.example backend.env
-# edit backend.env
+# edit backend.env (see docs/ENVIRONMENT_SETUP_AND_TUNING.md)
 docker compose -p shuestand up -d --build
 ```
 
@@ -105,25 +105,7 @@ When the Docker stack lives on an internal host (e.g., `vm-docker:8872`), expose
 
 ## Operator Guidance
 
-### Float alert webhooks
-Set `FLOAT_ALERT_WEBHOOK_URL` (in `.env` or `infra/docker/backend.env`) to any HTTPS endpoint that should receive float notifications—n8n, Slack bots, etc. The backend currently emits two event types:
+For full environment setup + tuning (grouped exactly like `infra/docker/backend.env.example`, including small/medium/high throughput presets), see:
+- `docs/ENVIRONMENT_SETUP_AND_TUNING.md`
 
-- `float_band_change`: fired whenever the on-chain or Cashu float crosses the configured band (`FLOAT_MIN_RATIO`/`FLOAT_MAX_RATIO`). Payload fields include `wallet` (`"onchain"`/`"cashu"`), `state` (`low|ok|high|unknown`), `balance_sats`, and `target_sats`.
-- `float_drift_alert`: fired when the combined float changes by more than `FLOAT_DRIFT_ALERT_RATIO` (as a fraction of `FLOAT_TARGET_SATS`) between guard-loop iterations and again when it settles back inside the buffer. Payload fields include `state` (`triggered|cleared`), `total_balance_sats`, `target_sats`, `drift_sats` (current deviation from the target), `delta_sats` (change since the previous snapshot), and `previous_total_sats`.
 
-Use these fields in your automation (Telegram, PagerDuty, etc.) to make the alerts human-readable. If the webhook is unreachable the backend logs a warning and retries on the next transition, so point it at something that accepts anonymous POSTs.
-
-### Transaction counter webhook
-Set `TRANSACTION_WEBHOOK_URL` to capture a monotonically increasing counter of completed swaps. The backend increments the counter exactly once per fulfilled deposit (Bitcoin → Cashu) and once per settled withdrawal (Cashu → Bitcoin) and POSTs a payload like:
-
-```json
-{
-  "event": "transaction_counter",
-  "counter": 42,
-  "kind": "deposit",
-  "entity_id": "dp_c6c5a9fd",
-  "timestamp": "2026-04-05T11:00:00Z"
-}
-```
-
-`kind` is `"deposit"` or `"withdrawal"`, `counter` is the global running total, and `entity_id` matches the ID you see in the kiosk/operator UI. If the webhook endpoint is down we log a warning and retry the next time a transaction completes.

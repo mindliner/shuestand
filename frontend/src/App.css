@@ -711,6 +711,51 @@ aside h2 {
   color: var(--color-helper);
 }
 
+.float-overview-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.float-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.float-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.8rem;
+  font-size: 0.85rem;
+}
+
+.float-bar-track {
+  position: relative;
+  height: 16px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-panel-contrast);
+  overflow: hidden;
+}
+
+.float-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(120deg, #d6c3a8, #98aed8);
+}
+
+.float-target-marker {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--color-warning);
+  opacity: 0.9;
+}
+
 .fee-mode-section {
   margin: 1rem 0;
 }
