@@ -38,7 +38,7 @@ Shuestand ties those two halves together. It keeps Lightning behind the curtain,
 git clone https://github.com/mindliner/shuestand.git
 cd infra/docker/
 cp backend.env.example backend.env
-# edit backend.env
+# edit backend.env (see docs/ENVIRONMENT_SETUP_AND_TUNING.md)
 docker compose -p shuestand up -d --build
 ```
 
@@ -104,6 +104,17 @@ When the Docker stack lives on an internal host (e.g., `vm-docker:8872`), expose
 3. **Reload nginx and verify HTTPS.** Visit `https://<domain>` and confirm that the kiosk loads and that the Nut18 QR transports point to the HTTPS host (the backend derives the callback URL from `Host` + `X-Forwarded-Proto`). Avoid double-proxy stacks that overwrite `X-Forwarded-Proto` with `http`, otherwise Cashu wallets will refuse to POST back to the funding endpoint.
 
 ## Operator Guidance
+
+For full environment setup + tuning (grouped exactly like `infra/docker/backend.env.example`), see:
+- `docs/ENVIRONMENT_SETUP_AND_TUNING.md`
+
+### Liquidity Tuning Guidelines
+
+Liquidity tuning and provision is part of the initial deployment and the ongoing monitoring. You need to anticipate concurrent use of your Shuestand instance. Let's say we want to _start small_ with 500k sats in each of the two floating pools (cashu and onchain). If we limit any single swap to 15% of the currently available float we can accomodate up to seven concurrent swaps of 75k in each direction. If expect service abuse such as people initiating B->C swap and never make an onchain payment then the liquidity is reserved for the time specified by the time-to-live parameter. In an environment with honest users only TTL can be larger.
+
+FLOAT_TARGET_SATS=**500000**
+SINGLE_REQUEST_CAP_RATIO=**0.15**
+PENDING_DEPOSIT_TTL_SECS=**600**
 
 ### Float alert webhooks
 Set `FLOAT_ALERT_WEBHOOK_URL` (in `.env` or `infra/docker/backend.env`) to any HTTPS endpoint that should receive float notifications—n8n, Slack bots, etc. The backend currently emits two event types:
