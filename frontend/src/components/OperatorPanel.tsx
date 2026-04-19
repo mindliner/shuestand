@@ -126,6 +126,7 @@ export function OperatorPanel() {
 
   const [logEntries, setLogEntries] = useState<OperatorLogEntry[]>([])
   const [logLive, setLogLive] = useState(true)
+  const [statsRange, setStatsRange] = useState<'24h' | '7d' | '30d'>('24h')
 
   const queryClient = useQueryClient()
 
@@ -225,6 +226,20 @@ export function OperatorPanel() {
   const transactionCounterQuery = useQuery({
     queryKey: ['transaction-counter', token],
     queryFn: () => getTransactionCounter(token),
+    enabled: Boolean(token),
+    refetchInterval: token ? 60000 : false,
+  })
+
+  const statsWithdrawalsQuery = useQuery({
+    queryKey: ['operator-withdrawals-stats', token],
+    queryFn: () => listOperatorWithdrawals(token, { states: ['settled'], limit: 1000 }),
+    enabled: Boolean(token),
+    refetchInterval: token ? 60000 : false,
+  })
+
+  const statsDepositsQuery = useQuery({
+    queryKey: ['operator-deposits-stats', token],
+    queryFn: () => listOperatorDeposits(token, { states: ['fulfilled'], limit: 1000 }),
     enabled: Boolean(token),
     refetchInterval: token ? 60000 : false,
   })
@@ -449,6 +464,38 @@ export function OperatorPanel() {
     }))
     return [...withdrawals, ...deposits].sort((a, b) => b.timestamp - a.timestamp)
   }, [cleanupItems, depositItems])
+
+  const statsData = useMemo(() => {
+    const now = Date.now()
+    const ranges = {
+      '24h': 24 * 60 * 60 * 1000,
+      '7d': 7 * 24 * 60 * 60 * 1000,
+      '30d': 30 * 24 * 60 * 60 * 1000,
+    } as const
+    const windowMs = ranges[statsRange]
+    const since = now - windowMs
+
+    const withdrawals = (statsWithdrawalsQuery.data ?? []).filter((wd) => {
+      const ts = Date.parse(wd.updated_at ?? wd.created_at ?? '')
+      return Number.isFinite(ts) && ts >= since
+    })
+    const deposits = (statsDepositsQuery.data ?? []).filter((dep) => {
+      const ts = Date.parse(dep.updated_at ?? dep.created_at ?? '')
+      return Number.isFinite(ts) && ts >= since
+    })
+
+    const volumeC2B = withdrawals.reduce(
+      (sum, wd) => sum + (wd.token_value_sats ?? wd.requested_amount_sats ?? 0),
+      0,
+    )
+    const volumeB2C = deposits.reduce((sum, dep) => sum + dep.amount_sats, 0)
+
+    return {
+      txCount: withdrawals.length + deposits.length,
+      volumeC2B,
+      volumeB2C,
+    }
+  }, [statsRange, statsWithdrawalsQuery.data, statsDepositsQuery.data])
 
   const ongoingItems = useMemo<OngoingTransactionEntry[]>(() => {
     const withdrawals: OngoingTransactionEntry[] = cleanupItems.map((wd) => ({
@@ -724,6 +771,52 @@ export function OperatorPanel() {
           <section className="operator-card">
             <div className="operator-card-header">
               <div className="operator-card-title">
+                <h3>Stats</h3>
+              </div>
+              <label className="status-meta">
+                Period
+                <select
+                  className="inline-select"
+                  value={statsRange}
+                  onChange={(e) => setStatsRange(e.target.value as '24h' | '7d' | '30d')}
+                >
+                  <option value="24h">24h</option>
+                  <option value="7d">7d</option>
+                  <option value="30d">30d</option>
+                </select>
+              </label>
+            </div>
+            {statsWithdrawalsQuery.isLoading || statsDepositsQuery.isLoading ? (
+              <p>Loading…</p>
+            ) : statsWithdrawalsQuery.isError ? (
+              <p className="status-error">{(statsWithdrawalsQuery.error as Error).message}</p>
+            ) : statsDepositsQuery.isError ? (
+              <p className="status-error">{(statsDepositsQuery.error as Error).message}</p>
+            ) : (
+              <div className="stats-grid">
+                <div>
+                  <span className="status-meta">Anzahl tx ({statsRange})</span>
+                  <strong>{statsData.txCount.toLocaleString('en-US')}</strong>
+                </div>
+                <div>
+                  <span className="status-meta">Volumen C→B ({statsRange})</span>
+                  <strong>{formatSats(statsData.volumeC2B)} sats</strong>
+                </div>
+                <div>
+                  <span className="status-meta">Volumen B→C ({statsRange})</span>
+                  <strong>{formatSats(statsData.volumeB2C)} sats</strong>
+                </div>
+                <div>
+                  <span className="status-meta">Total completed</span>
+                  <strong>{(transactionCounterQuery.data?.count ?? 0).toLocaleString('en-US')}</strong>
+                </div>
+              </div>
+            )}
+          </section>
+
+          <section className="operator-card">
+            <div className="operator-card-header">
+              <div className="operator-card-title">
                 <h3>Activity log</h3>
               </div>
               <label className="checkbox-row">
@@ -771,12 +864,6 @@ export function OperatorPanel() {
                   </li>
                 ))}
               </ul>
-            )}
-            {typeof transactionCounterQuery.data?.count === 'number' && (
-              <p className="operator-card-footnote">
-                {transactionCounterQuery.data.count.toLocaleString('en-US')} transaction
-                {transactionCounterQuery.data.count === 1 ? '' : 's'} completed
-              </p>
             )}
           </section>
 

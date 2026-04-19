@@ -72,6 +72,11 @@ export interface OperatorWithdrawalListParams {
   limit?: number
 }
 
+export interface OperatorDepositListParams {
+  states?: DepositState[]
+  limit?: number
+}
+
 export interface OperatorWithdrawalActionRequest {
   action: 'mark_settled' | 'mark_failed' | 'requeue' | 'archive'
   note?: string

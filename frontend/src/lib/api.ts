@@ -23,6 +23,7 @@ import type {
   Withdrawal,
   OperatorWithdrawalActionRequest,
   OperatorWithdrawalListParams,
+  OperatorDepositListParams,
   OperatorDepositActionRequest,
   PublicConfigResponse,
   OperationModeResponse,
@@ -320,7 +321,7 @@ export function operateWithdrawal(
 
 export function listOperatorDeposits(
   token: string,
-  params?: OperatorWithdrawalListParams,
+  params?: OperatorDepositListParams,
 ): Promise<Deposit[]> {
   const search = new URLSearchParams()
   params?.states?.forEach((state) => {

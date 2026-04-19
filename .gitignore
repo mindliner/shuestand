@@ -5,6 +5,5 @@ shuestand.db
 backend/shuestand.db
 .env
 .env.*
-
 infra/docker/backend.env
 aux/
