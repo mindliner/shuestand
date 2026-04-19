@@ -190,6 +190,16 @@ export interface TransactionCounterResponse {
   count: number
 }
 
+export interface TransactionStatsWindow {
+  tx_count: number
+  c_to_b_sats: number
+  b_to_c_sats: number
+}
+
+export interface TransactionStatsResponse {
+  windows: Record<'24h' | '7d' | '30d', TransactionStatsWindow>
+}
+
 export type FloatState = 'ok' | 'low' | 'high' | 'unknown'
 
 export interface WalletFloatStatus {

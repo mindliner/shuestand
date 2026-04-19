@@ -29,6 +29,7 @@ import type {
   OperationModeResponse,
   OperationMode,
   TransactionCounterResponse,
+  TransactionStatsResponse,
 } from '../types/api'
 
 const JSON_HEADERS = {
@@ -351,6 +352,12 @@ export function operateDeposit(
 
 export function getTransactionCounter(token: string): Promise<TransactionCounterResponse> {
   return request<TransactionCounterResponse>('/api/v1/operator/transactions/counter', {
+    headers: jsonHeaders(token),
+  })
+}
+
+export function getTransactionStats(token: string): Promise<TransactionStatsResponse> {
+  return request<TransactionStatsResponse>('/api/v1/operator/transactions/stats', {
     headers: jsonHeaders(token),
   })
 }

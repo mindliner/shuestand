@@ -102,6 +102,77 @@ impl Database {
         }
     }
 
+    pub async fn transaction_stats_since(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<TransactionStats, Error> {
+        let c_to_b_sats = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COALESCE(SUM(COALESCE(token_value_sats, requested_amount_sats, 0)), 0)
+            FROM withdrawals
+            WHERE state = $1
+              AND transaction_counted_at IS NOT NULL
+              AND transaction_counted_at >= $2
+            "#,
+        )
+        .bind(WithdrawalState::Settled.as_str())
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await?
+        .max(0) as u64;
+
+        let b_to_c_sats = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COALESCE(SUM(amount_sats), 0)
+            FROM deposits
+            WHERE state = $1
+              AND transaction_counted_at IS NOT NULL
+              AND transaction_counted_at >= $2
+            "#,
+        )
+        .bind(DepositState::Fulfilled.as_str())
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await?
+        .max(0) as u64;
+
+        let c_to_b_count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)
+            FROM withdrawals
+            WHERE state = $1
+              AND transaction_counted_at IS NOT NULL
+              AND transaction_counted_at >= $2
+            "#,
+        )
+        .bind(WithdrawalState::Settled.as_str())
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await?
+        .max(0) as u64;
+
+        let b_to_c_count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)
+            FROM deposits
+            WHERE state = $1
+              AND transaction_counted_at IS NOT NULL
+              AND transaction_counted_at >= $2
+            "#,
+        )
+        .bind(DepositState::Fulfilled.as_str())
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await?
+        .max(0) as u64;
+
+        Ok(TransactionStats {
+            tx_count: c_to_b_count + b_to_c_count,
+            c_to_b_sats,
+            b_to_c_sats,
+        })
+    }
+
     pub async fn insert_deposit(&self, deposit: &Deposit) -> Result<(), Error> {
         sqlx::query(
             r#"INSERT INTO deposits
@@ -1196,6 +1267,13 @@ pub struct StateLiabilityRow {
     pub state: String,
     pub count: u64,
     pub amount_sats: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct TransactionStats {
+    pub tx_count: u64,
+    pub c_to_b_sats: u64,
+    pub b_to_c_sats: u64,
 }
 
 #[derive(Clone, Debug)]

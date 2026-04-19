@@ -137,6 +137,10 @@ pub fn router(state: AppState) -> Router {
             get(get_transaction_counter),
         )
         .route(
+            "/api/v1/operator/transactions/stats",
+            get(get_transaction_stats),
+        )
+        .route(
             "/api/v1/operator/mode",
             get(get_operation_mode).post(update_operation_mode),
         )
@@ -550,6 +554,18 @@ impl FeeEstimateEntryPayload {
 #[derive(Serialize)]
 struct TransactionCounterResponse {
     count: i64,
+}
+
+#[derive(Serialize)]
+struct TransactionStatsResponse {
+    windows: HashMap<String, TransactionStatsWindow>,
+}
+
+#[derive(Serialize)]
+struct TransactionStatsWindow {
+    tx_count: u64,
+    c_to_b_sats: u64,
+    b_to_c_sats: u64,
 }
 
 #[derive(Serialize)]
@@ -2492,6 +2508,39 @@ async fn get_transaction_counter(
     let count = state.db.transaction_counter().await.map_err(server_error)?;
     Ok(Json(ApiResponse {
         data: TransactionCounterResponse { count },
+    }))
+}
+
+async fn get_transaction_stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<TransactionStatsResponse> {
+    require_operator_token(&state, &headers)?;
+
+    let mut windows = HashMap::new();
+    for (label, duration) in [
+        ("24h", Duration::hours(24)),
+        ("7d", Duration::days(7)),
+        ("30d", Duration::days(30)),
+    ] {
+        let since = Utc::now() - duration;
+        let stats = state
+            .db
+            .transaction_stats_since(since)
+            .await
+            .map_err(server_error)?;
+        windows.insert(
+            label.to_string(),
+            TransactionStatsWindow {
+                tx_count: stats.tx_count,
+                c_to_b_sats: stats.c_to_b_sats,
+                b_to_c_sats: stats.b_to_c_sats,
+            },
+        );
+    }
+
+    Ok(Json(ApiResponse {
+        data: TransactionStatsResponse { windows },
     }))
 }
 

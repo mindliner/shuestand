@@ -19,6 +19,7 @@ import {
   getOperationMode,
   setOperationMode,
   getTransactionCounter,
+  getTransactionStats,
   getPublicConfig,
 } from '../lib/api'
 import { CopyButton } from './KioskStatusCards'
@@ -230,16 +231,9 @@ export function OperatorPanel() {
     refetchInterval: token ? 60000 : false,
   })
 
-  const statsWithdrawalsQuery = useQuery({
-    queryKey: ['operator-withdrawals-stats', token],
-    queryFn: () => listOperatorWithdrawals(token, { states: ['settled'], limit: 1000 }),
-    enabled: Boolean(token),
-    refetchInterval: token ? 60000 : false,
-  })
-
-  const statsDepositsQuery = useQuery({
-    queryKey: ['operator-deposits-stats', token],
-    queryFn: () => listOperatorDeposits(token, { states: ['fulfilled'], limit: 1000 }),
+  const transactionStatsQuery = useQuery({
+    queryKey: ['transaction-stats', token],
+    queryFn: () => getTransactionStats(token),
     enabled: Boolean(token),
     refetchInterval: token ? 60000 : false,
   })
@@ -466,36 +460,9 @@ export function OperatorPanel() {
   }, [cleanupItems, depositItems])
 
   const statsData = useMemo(() => {
-    const now = Date.now()
-    const ranges = {
-      '24h': 24 * 60 * 60 * 1000,
-      '7d': 7 * 24 * 60 * 60 * 1000,
-      '30d': 30 * 24 * 60 * 60 * 1000,
-    } as const
-    const windowMs = ranges[statsRange]
-    const since = now - windowMs
-
-    const withdrawals = (statsWithdrawalsQuery.data ?? []).filter((wd) => {
-      const ts = Date.parse(wd.updated_at ?? wd.created_at ?? '')
-      return Number.isFinite(ts) && ts >= since
-    })
-    const deposits = (statsDepositsQuery.data ?? []).filter((dep) => {
-      const ts = Date.parse(dep.updated_at ?? dep.created_at ?? '')
-      return Number.isFinite(ts) && ts >= since
-    })
-
-    const volumeC2B = withdrawals.reduce(
-      (sum, wd) => sum + (wd.token_value_sats ?? wd.requested_amount_sats ?? 0),
-      0,
-    )
-    const volumeB2C = deposits.reduce((sum, dep) => sum + dep.amount_sats, 0)
-
-    return {
-      txCount: withdrawals.length + deposits.length,
-      volumeC2B,
-      volumeB2C,
-    }
-  }, [statsRange, statsWithdrawalsQuery.data, statsDepositsQuery.data])
+    const fallback = { tx_count: 0, c_to_b_sats: 0, b_to_c_sats: 0 }
+    return transactionStatsQuery.data?.windows?.[statsRange] ?? fallback
+  }, [statsRange, transactionStatsQuery.data])
 
   const ongoingItems = useMemo<OngoingTransactionEntry[]>(() => {
     const withdrawals: OngoingTransactionEntry[] = cleanupItems.map((wd) => ({
@@ -786,25 +753,23 @@ export function OperatorPanel() {
                 </select>
               </label>
             </div>
-            {statsWithdrawalsQuery.isLoading || statsDepositsQuery.isLoading ? (
+            {transactionStatsQuery.isLoading ? (
               <p>Loading…</p>
-            ) : statsWithdrawalsQuery.isError ? (
-              <p className="status-error">{(statsWithdrawalsQuery.error as Error).message}</p>
-            ) : statsDepositsQuery.isError ? (
-              <p className="status-error">{(statsDepositsQuery.error as Error).message}</p>
+            ) : transactionStatsQuery.isError ? (
+              <p className="status-error">{(transactionStatsQuery.error as Error).message}</p>
             ) : (
               <div className="stats-grid">
                 <div>
                   <span className="status-meta">Anzahl tx ({statsRange})</span>
-                  <strong>{statsData.txCount.toLocaleString('en-US')}</strong>
+                  <strong>{statsData.tx_count.toLocaleString('en-US')}</strong>
                 </div>
                 <div>
                   <span className="status-meta">Volumen C→B ({statsRange})</span>
-                  <strong>{formatSats(statsData.volumeC2B)} sats</strong>
+                  <strong>{formatSats(statsData.c_to_b_sats)} sats</strong>
                 </div>
                 <div>
                   <span className="status-meta">Volumen B→C ({statsRange})</span>
-                  <strong>{formatSats(statsData.volumeB2C)} sats</strong>
+                  <strong>{formatSats(statsData.b_to_c_sats)} sats</strong>
                 </div>
                 <div>
                   <span className="status-meta">Total completed</span>
