@@ -108,7 +108,7 @@ impl Database {
     ) -> Result<TransactionStats, Error> {
         let c_to_b_sats = sqlx::query_scalar::<_, i64>(
             r#"
-            SELECT COALESCE(SUM(COALESCE(token_value_sats, requested_amount_sats, 0)), 0)
+            SELECT COALESCE(SUM(COALESCE(token_value_sats, requested_amount_sats, 0)), 0)::BIGINT
             FROM withdrawals
             WHERE state = $1
               AND transaction_counted_at IS NOT NULL
@@ -123,7 +123,7 @@ impl Database {
 
         let b_to_c_sats = sqlx::query_scalar::<_, i64>(
             r#"
-            SELECT COALESCE(SUM(amount_sats), 0)
+            SELECT COALESCE(SUM(amount_sats), 0)::BIGINT
             FROM deposits
             WHERE state = $1
               AND transaction_counted_at IS NOT NULL
