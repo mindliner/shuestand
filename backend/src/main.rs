@@ -432,6 +432,7 @@ async fn main() -> Result<(), anyhow::Error> {
         let max_ratio = config.float_max_ratio;
         let interval = config.float_guard_interval;
         let drift_alert_ratio = config.float_drift_alert_ratio;
+        let drift_alert_sats = config.float_drift_alert_sats;
         let mode_handle = operation_mode.clone();
         let db_clone = db.clone();
         let auto_drain_threshold = config.withdrawal_min_sats.saturating_mul(2);
@@ -447,6 +448,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 min_ratio,
                 max_ratio,
                 drift_alert_ratio,
+                drift_alert_sats,
                 interval,
                 auto_drain_threshold,
                 mode_handle,
@@ -679,6 +681,7 @@ async fn monitor_float_levels(
     min_ratio: f32,
     max_ratio: f32,
     drift_alert_ratio: f32,
+    drift_alert_sats: u64,
     interval: Duration,
     auto_drain_threshold: u64,
     operation_mode: Arc<RwLock<OperationMode>>,
@@ -691,7 +694,7 @@ async fn monitor_float_levels(
     }
 
     let mut drift_alert_active = false;
-    let mut last_total_balance: Option<u64> = None;
+    let mut last_effective_total_balance: Option<u64> = None;
 
     loop {
         let onchain_snapshot =
@@ -766,24 +769,49 @@ async fn monitor_float_levels(
         }
 
         let total_balance = onchain_snapshot.balance_sats + cashu_snapshot.balance_sats;
-        let drift_vs_target = target_sats as i64 - total_balance as i64;
+        let reserved_onchain = match db.reserved_onchain_withdrawal_sats().await {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(target: "backend", error = %err, "failed to read reserved on-chain sats for drift guard");
+                0
+            }
+        };
+        let reserved_cashu = match db.reserved_cashu_deposit_sats().await {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(target: "backend", error = %err, "failed to read reserved cashu sats for drift guard");
+                0
+            }
+        };
+        let effective_total_balance = total_balance
+            .saturating_sub(reserved_onchain)
+            .saturating_sub(reserved_cashu);
+        let drift_vs_target = target_sats as i64 - effective_total_balance as i64;
         if target_sats > 0 {
-            let total_ratio = total_balance as f64 / target_sats as f64;
+            let total_ratio = effective_total_balance as f64 / target_sats as f64;
             metrics.set_total_float_ratio(total_ratio);
             metrics.set_float_drift_sats(drift_vs_target);
 
-            if let Some(previous_total) = last_total_balance {
-                let delta = total_balance as i64 - previous_total as i64;
-                let delta_ratio = (delta.abs() as f64) / target_sats as f64;
+            if let Some(previous_total) = last_effective_total_balance {
+                let delta = effective_total_balance as i64 - previous_total as i64;
+                let threshold_sats = if drift_alert_sats > 0 {
+                    drift_alert_sats
+                } else {
+                    ((target_sats as f64) * (drift_alert_ratio as f64)).ceil() as u64
+                };
 
-                if delta_ratio >= drift_alert_ratio as f64 {
+                if delta.unsigned_abs() >= threshold_sats {
                     if !drift_alert_active {
                         tracing::warn!(
                             target: "backend",
-                            total_balance_sats = total_balance,
+                            effective_total_balance_sats = effective_total_balance,
+                            raw_total_balance_sats = total_balance,
                             previous_total_sats = previous_total,
                             target_sats,
                             delta_sats = delta,
+                            threshold_sats,
+                            reserved_onchain_sats = reserved_onchain,
+                            reserved_cashu_sats = reserved_cashu,
                             "total float change exceeded threshold"
                         );
                         drift_alert_active = true;
@@ -791,7 +819,7 @@ async fn monitor_float_levels(
                             if let Err(err) = emit_float_drift_alert(
                                 url,
                                 "triggered",
-                                total_balance,
+                                effective_total_balance,
                                 target_sats,
                                 drift_vs_target,
                                 delta,
@@ -810,9 +838,13 @@ async fn monitor_float_levels(
                 } else if drift_alert_active {
                     tracing::info!(
                         target: "backend",
-                        total_balance_sats = total_balance,
+                        effective_total_balance_sats = effective_total_balance,
+                        raw_total_balance_sats = total_balance,
                         previous_total_sats = previous_total,
                         target_sats,
+                        threshold_sats,
+                        reserved_onchain_sats = reserved_onchain,
+                        reserved_cashu_sats = reserved_cashu,
                         "total float change back within buffer"
                     );
                     drift_alert_active = false;
@@ -820,7 +852,7 @@ async fn monitor_float_levels(
                         if let Err(err) = emit_float_drift_alert(
                             url,
                             "cleared",
-                            total_balance,
+                            effective_total_balance,
                             target_sats,
                             drift_vs_target,
                             delta,
@@ -839,7 +871,7 @@ async fn monitor_float_levels(
             }
         }
 
-        last_total_balance = Some(total_balance);
+        last_effective_total_balance = Some(effective_total_balance);
 
         if auto_drain_threshold > 0 && total_balance <= auto_drain_threshold {
             let should_trigger = {
