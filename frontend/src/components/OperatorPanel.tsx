@@ -92,6 +92,10 @@ type OperatorLogEntry = {
   timestamp: number
 }
 
+type OngoingTransactionEntry =
+  | { type: 'wd'; timestamp: number; createdAtLabel: string; withdrawal: Withdrawal }
+  | { type: 'dep'; timestamp: number; createdAtLabel: string; deposit: Deposit }
+
 export function OperatorPanel() {
   const storedToken =
     typeof window !== 'undefined'
@@ -446,6 +450,22 @@ export function OperatorPanel() {
     return [...withdrawals, ...deposits].sort((a, b) => b.timestamp - a.timestamp)
   }, [cleanupItems, depositItems])
 
+  const ongoingItems = useMemo<OngoingTransactionEntry[]>(() => {
+    const withdrawals: OngoingTransactionEntry[] = cleanupItems.map((wd) => ({
+      type: 'wd',
+      timestamp: wd.created_at ? new Date(wd.created_at).getTime() : 0,
+      createdAtLabel: wd.created_at ? new Date(wd.created_at).toLocaleString() : '—',
+      withdrawal: wd,
+    }))
+    const deposits: OngoingTransactionEntry[] = depositItems.map((dep) => ({
+      type: 'dep',
+      timestamp: dep.created_at ? new Date(dep.created_at).getTime() : 0,
+      createdAtLabel: dep.created_at ? new Date(dep.created_at).toLocaleString() : '—',
+      deposit: dep,
+    }))
+    return [...withdrawals, ...deposits].sort((a, b) => b.timestamp - a.timestamp)
+  }, [cleanupItems, depositItems])
+
   useEffect(() => {
     if (logLive) {
       setLogEntries(computedLogEntries)
@@ -654,17 +674,17 @@ export function OperatorPanel() {
                     <p className={netClassName(ledgerSnapshot.cashu.net_sats)}>
                       Net {formatSigned(ledgerSnapshot.cashu.net_sats)} sats
                     </p>
-                    <ul>
-                      <li>
+                    <div className="ledger-liability-rows">
+                      <p className="status-meta">
                         Awaiting confirmations: {formatSats(ledgerSnapshot.cashu.liabilities.awaiting_confirmations.amount_sats)} sats · {ledgerSnapshot.cashu.liabilities.awaiting_confirmations.count} deposits
-                      </li>
-                      <li>
+                      </p>
+                      <p className="status-meta">
                         Minting/delivering: {formatSats(ledgerSnapshot.cashu.liabilities.minting.amount_sats)} sats · {ledgerSnapshot.cashu.liabilities.minting.count} deposits
-                      </li>
-                      <li>
+                      </p>
+                      <p className="status-meta">
                         Ready for pickup: {formatSats(ledgerSnapshot.cashu.liabilities.ready.amount_sats)} sats · {ledgerSnapshot.cashu.liabilities.ready.count} deposits
-                      </li>
-                    </ul>
+                      </p>
+                    </div>
                   </div>
                   <div>
                     <h4>On-chain</h4>
@@ -679,20 +699,20 @@ export function OperatorPanel() {
                     <p className={netClassName(ledgerSnapshot.onchain.net_sats)}>
                       Net {formatSigned(ledgerSnapshot.onchain.net_sats)} sats
                     </p>
-                    <ul>
-                      <li>
+                    <div className="ledger-liability-rows">
+                      <p className="status-meta">
                         Awaiting tokens: {formatSats(ledgerSnapshot.onchain.liabilities.funding.amount_sats)} sats · {ledgerSnapshot.onchain.liabilities.funding.count} requests
-                      </li>
-                      <li>
+                      </p>
+                      <p className="status-meta">
                         Queued: {formatSats(ledgerSnapshot.onchain.liabilities.queued.amount_sats)} sats · {ledgerSnapshot.onchain.liabilities.queued.count} withdrawals
-                      </li>
-                      <li>
+                      </p>
+                      <p className="status-meta">
                         Broadcasting: {formatSats(ledgerSnapshot.onchain.liabilities.broadcasting.amount_sats)} sats · {ledgerSnapshot.onchain.liabilities.broadcasting.count} withdrawals
-                      </li>
-                      <li>
+                      </p>
+                      <p className="status-meta">
                         Confirming: {formatSats(ledgerSnapshot.onchain.liabilities.confirming.amount_sats)} sats · {ledgerSnapshot.onchain.liabilities.confirming.count} withdrawals
-                      </li>
-                    </ul>
+                      </p>
+                    </div>
                   </div>
                 </div>
               </>
@@ -762,172 +782,154 @@ export function OperatorPanel() {
 
           <section className="operator-card">
             <div className="operator-card-header">
-              <h3>Ongoing withdrawals</h3>
-              <button type="button" onClick={() => cleanupQuery.refetch()} disabled={cleanupQuery.isFetching}>
-                Refresh
-              </button>
-            </div>
-            {cleanupQuery.isLoading ? (
-              <p>Loading…</p>
-            ) : cleanupQuery.isError ? (
-              <p className="status-error">{(cleanupQuery.error as Error).message}</p>
-            ) : cleanupItems.length === 0 ? (
-              <p>No withdrawals need manual cleanup right now.</p>
-            ) : (
-              <div className="operator-table-scroll">
-                <table className="operator-table condensed-table">
-                  <thead>
-                    <tr>
-                      <th>ID</th>
-                      <th>State</th>
-                      <th>Amount</th>
-                      <th>Address</th>
-                      <th>Txid</th>
-                      <th>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {cleanupItems.map((wd) => {
-                      const amount = wd.token_value_sats ?? wd.requested_amount_sats ?? 0
-                      const createdAt = wd.created_at ? new Date(wd.created_at).toLocaleString() : '—'
-                      const canSettle = wd.state !== 'settled' && wd.state !== 'funding'
-                      const canFail = wd.state !== 'settled'
-                      const canRequeue =
-                        wd.state === 'failed' || wd.state === 'broadcasting' || wd.state === 'confirming'
-                      const canArchive = wd.state === 'failed' || wd.state === 'funding'
-                      return (
-                        <tr key={wd.id}>
-                          <td>
-                            <div className="stacked">
-                              <span className="status-meta code">{wd.id}</span>
-                              <span className="status-meta">{createdAt}</span>
-                            </div>
-                          </td>
-                          <td>
-                            <span className="status-pill compact">{wd.state}</span>
-                          </td>
-                          <td>{formatSats(amount)} sats</td>
-                          <td className="status-meta code">{wd.delivery_address}</td>
-                          <td className="status-meta code">{wd.txid ?? '—'}</td>
-                          <td className="actions-cell">
-                            <div className="table-inputs">
-                              <input
-                                type="text"
-                                aria-label="Failure note"
-                                className="table-input"
-                                value={cleanupNotes[wd.id] ?? ''}
-                                onChange={(e) => handleCleanupNoteChange(wd.id, e.target.value)}
-                                placeholder="Failure note"
-                              />
-                              <input
-                                type="text"
-                                aria-label="Override txid"
-                                className="table-input"
-                                value={cleanupTxids[wd.id] ?? ''}
-                                onChange={(e) => handleCleanupTxidChange(wd.id, e.target.value)}
-                                placeholder="Override txid"
-                              />
-                            </div>
-                            <div className="button-row table-buttons">
-                              <button
-                                type="button"
-                                className="secondary"
-                                onClick={() => handleCleanupAction(wd, 'mark_settled')}
-                                disabled={!token || !canSettle || cleanupMutation.isPending}
-                              >
-                                Mark settled
-                              </button>
-                              <button
-                                type="button"
-                                className="secondary"
-                                onClick={() => handleCleanupAction(wd, 'mark_failed')}
-                                disabled={!token || !canFail || cleanupMutation.isPending}
-                              >
-                                Mark failed
-                              </button>
-                              <button
-                                type="button"
-                                className="secondary"
-                                onClick={() => handleCleanupAction(wd, 'requeue')}
-                                disabled={!token || !canRequeue || cleanupMutation.isPending}
-                              >
-                                Requeue
-                              </button>
-                              <button
-                                type="button"
-                                className="secondary"
-                                onClick={() => handleCleanupAction(wd, 'archive')}
-                                disabled={!token || !canArchive || cleanupMutation.isPending}
-                              >
-                                Archive
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-            {cleanupMutation.isError && (
-              <p className="status-error">{(cleanupMutation.error as Error).message}</p>
-            )}
-          </section>
-
-          <section className="operator-card">
-            <div className="operator-card-header">
-              <h3>Ongoing deposits</h3>
+              <h3>Ongoing transactions</h3>
               <button
                 type="button"
-                onClick={() => depositCleanupQuery.refetch()}
-                disabled={depositCleanupQuery.isFetching}
+                onClick={() => {
+                  cleanupQuery.refetch()
+                  depositCleanupQuery.refetch()
+                }}
+                disabled={cleanupQuery.isFetching || depositCleanupQuery.isFetching}
               >
                 Refresh
               </button>
             </div>
-            {depositCleanupQuery.isLoading ? (
+            {cleanupQuery.isLoading || depositCleanupQuery.isLoading ? (
               <p>Loading…</p>
+            ) : cleanupQuery.isError ? (
+              <p className="status-error">{(cleanupQuery.error as Error).message}</p>
             ) : depositCleanupQuery.isError ? (
               <p className="status-error">{(depositCleanupQuery.error as Error).message}</p>
-            ) : depositItems.length === 0 ? (
-              <p>No deposits need manual cleanup right now.</p>
+            ) : ongoingItems.length === 0 ? (
+              <p>No deposits or withdrawals need manual cleanup right now.</p>
             ) : (
               <div className="operator-table-scroll">
                 <table className="operator-table condensed-table">
                   <thead>
                     <tr>
+                      <th>Type</th>
                       <th>ID</th>
                       <th>State</th>
                       <th>Amount</th>
-                      <th>Address</th>
-                      <th>Confs</th>
+                      <th>Details</th>
                       <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {depositItems.map((dep) => {
-                      const createdAt = dep.created_at ? new Date(dep.created_at).toLocaleString() : '—'
+                    {ongoingItems.map((entry) => {
+                      if (entry.type === 'wd') {
+                        const wd = entry.withdrawal
+                        const amount = wd.token_value_sats ?? wd.requested_amount_sats ?? 0
+                        const canSettle = wd.state !== 'settled' && wd.state !== 'funding'
+                        const canFail = wd.state !== 'settled'
+                        const canRequeue =
+                          wd.state === 'failed' || wd.state === 'broadcasting' || wd.state === 'confirming'
+                        const canArchive = wd.state === 'failed' || wd.state === 'funding'
+                        return (
+                          <tr key={`wd-${wd.id}`}>
+                            <td>
+                              <span className="status-pill compact">wd</span>
+                            </td>
+                            <td>
+                              <div className="stacked">
+                                <span className="status-meta code">{wd.id}</span>
+                                <span className="status-meta">{entry.createdAtLabel}</span>
+                              </div>
+                            </td>
+                            <td>
+                              <span className="status-pill compact">{wd.state}</span>
+                            </td>
+                            <td>{formatSats(amount)} sats</td>
+                            <td>
+                              <div className="stacked">
+                                <span className="status-meta code">{wd.delivery_address}</span>
+                                <span className="status-meta code">Txid: {wd.txid ?? '—'}</span>
+                              </div>
+                            </td>
+                            <td className="actions-cell">
+                              <div className="table-inputs">
+                                <input
+                                  type="text"
+                                  aria-label="Failure note"
+                                  className="table-input"
+                                  value={cleanupNotes[wd.id] ?? ''}
+                                  onChange={(e) => handleCleanupNoteChange(wd.id, e.target.value)}
+                                  placeholder="Failure note"
+                                />
+                                <input
+                                  type="text"
+                                  aria-label="Override txid"
+                                  className="table-input"
+                                  value={cleanupTxids[wd.id] ?? ''}
+                                  onChange={(e) => handleCleanupTxidChange(wd.id, e.target.value)}
+                                  placeholder="Override txid"
+                                />
+                              </div>
+                              <div className="button-row table-buttons">
+                                <button
+                                  type="button"
+                                  className="secondary"
+                                  onClick={() => handleCleanupAction(wd, 'mark_settled')}
+                                  disabled={!token || !canSettle || cleanupMutation.isPending}
+                                >
+                                  Mark settled
+                                </button>
+                                <button
+                                  type="button"
+                                  className="secondary"
+                                  onClick={() => handleCleanupAction(wd, 'mark_failed')}
+                                  disabled={!token || !canFail || cleanupMutation.isPending}
+                                >
+                                  Mark failed
+                                </button>
+                                <button
+                                  type="button"
+                                  className="secondary"
+                                  onClick={() => handleCleanupAction(wd, 'requeue')}
+                                  disabled={!token || !canRequeue || cleanupMutation.isPending}
+                                >
+                                  Requeue
+                                </button>
+                                <button
+                                  type="button"
+                                  className="secondary"
+                                  onClick={() => handleCleanupAction(wd, 'archive')}
+                                  disabled={!token || !canArchive || cleanupMutation.isPending}
+                                >
+                                  Archive
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        )
+                      }
+
+                      const dep = entry.deposit
                       const canFulfill = dep.state === 'ready' || dep.state === 'delivering'
                       const canFail = dep.state !== 'fulfilled' && dep.state !== 'archived_by_operator'
                       const canArchive = dep.state === 'failed' || dep.state === 'fulfilled'
                       return (
-                        <tr key={dep.id}>
+                        <tr key={`dep-${dep.id}`}>
+                          <td>
+                            <span className="status-pill compact">dep</span>
+                          </td>
                           <td>
                             <div className="stacked">
                               <span className="status-meta code">{dep.id}</span>
-                              <span className="status-meta">{createdAt}</span>
+                              <span className="status-meta">{entry.createdAtLabel}</span>
                             </div>
                           </td>
                           <td>
                             <span className="status-pill compact">{dep.state}</span>
                           </td>
                           <td>{formatSats(dep.amount_sats)} sats</td>
-                          <td className="status-meta code">{dep.address}</td>
                           <td>
-                            <span className="status-meta">
-                              {dep.confirmations} / {dep.target_confirmations}
-                            </span>
+                            <div className="stacked">
+                              <span className="status-meta code">{dep.address}</span>
+                              <span className="status-meta">
+                                Confs: {dep.confirmations} / {dep.target_confirmations}
+                              </span>
+                            </div>
                           </td>
                           <td className="actions-cell">
                             <div className="table-inputs">
@@ -973,6 +975,9 @@ export function OperatorPanel() {
                   </tbody>
                 </table>
               </div>
+            )}
+            {cleanupMutation.isError && (
+              <p className="status-error">{(cleanupMutation.error as Error).message}</p>
             )}
             {depositCleanupMutation.isError && (
               <p className="status-error">{(depositCleanupMutation.error as Error).message}</p>
@@ -1101,7 +1106,7 @@ export function OperatorPanel() {
                     </label>
                     {topupBip21 && (
                       <div className="qr-card">
-                        <QRCodeSVG value={topupBip21} size={132} />
+                        <QRCodeSVG value={topupBip21} size={180} />
                         <CopyButton label="Copy BIP21" text={topupBip21} />
                       </div>
                     )}
@@ -1151,49 +1156,19 @@ export function OperatorPanel() {
                   </label>
                   <div className="fee-mode-section">
                     <span className="helper">Fee preference</span>
-                    <div className="fee-mode-options">
-                      <label className={`fee-mode-option ${!feeEstimates ? 'disabled' : ''}`}>
-                        <input
-                          type="radio"
-                          name="onchain-fee-mode"
-                          value="fast"
-                          disabled={!feeEstimates}
-                          checked={Boolean(feeEstimates) && payoutFeeMode === 'fast'}
-                          onChange={() => setPayoutFeeMode('fast')}
-                        />
-                        <div>
-                          <strong>Fast (next block)</strong>
-                          <span className="fee-mode-rate">{formatFeeValue(feeEstimates?.fast, '…')}</span>
-                        </div>
-                      </label>
-                      <label className={`fee-mode-option ${!feeEstimates ? 'disabled' : ''}`}>
-                        <input
-                          type="radio"
-                          name="onchain-fee-mode"
-                          value="economy"
-                          disabled={!feeEstimates}
-                          checked={Boolean(feeEstimates) && payoutFeeMode === 'economy'}
-                          onChange={() => setPayoutFeeMode('economy')}
-                        />
-                        <div>
-                          <strong>Economy (≈3 blocks)</strong>
-                          <span className="fee-mode-rate">{formatFeeValue(feeEstimates?.economy, '…')}</span>
-                        </div>
-                      </label>
-                      <label className="fee-mode-option">
-                        <input
-                          type="radio"
-                          name="onchain-fee-mode"
-                          value="custom"
-                          checked={!feeEstimates || payoutFeeMode === 'custom'}
-                          onChange={() => setPayoutFeeMode('custom')}
-                        />
-                        <div>
-                          <strong>Custom</strong>
-                          <span className="fee-mode-rate">Enter manually</span>
-                        </div>
-                      </label>
-                    </div>
+                    <select
+                      className="fee-mode-select"
+                      value={payoutFeeMode}
+                      onChange={(e) => setPayoutFeeMode(e.target.value as 'fast' | 'economy' | 'custom')}
+                    >
+                      <option value="fast" disabled={!feeEstimates}>
+                        {`Fast (next block)${feeEstimates ? ` · ${formatFeeValue(feeEstimates.fast)}` : ' · unavailable'}`}
+                      </option>
+                      <option value="economy" disabled={!feeEstimates}>
+                        {`Economy (≈3 blocks)${feeEstimates ? ` · ${formatFeeValue(feeEstimates.economy)}` : ' · unavailable'}`}
+                      </option>
+                      <option value="custom">Custom (manual)</option>
+                    </select>
                     {feeEstimates && (
                       <p className="status-meta">
                         Fast updated {formatUpdatedTime(feeEstimates.fast)} · Economy {formatUpdatedTime(feeEstimates.economy)}
@@ -1327,7 +1302,7 @@ export function OperatorPanel() {
                       State: <strong>{invoice.state}</strong> ({invoice.method})
                     </p>
                     <div className="qr-card">
-                      <QRCodeSVG value={invoice.request} size={132} />
+                      <QRCodeSVG value={invoice.request} size={180} />
                       <CopyButton label="Copy invoice" text={invoice.request} />
                     </div>
                     <div className="button-row">

@@ -131,7 +131,7 @@ export function DepositStatusCard({
       <CopyButton label="Copy deposit ID" text={deposit.id} />
       {bip21 && (
         <div className="qr-card">
-          <QRCodeSVG value={bip21} size={132} />
+          <QRCodeSVG value={bip21} size={180} />
           <CopyButton label="Copy payment URI" text={bip21} />
         </div>
       )}
@@ -185,7 +185,7 @@ export function DepositStatusCard({
           <p>Pickup token</p>
           {canRenderStaticPickupQr ? (
             <div className="qr-card">
-              <QRCodeSVG value={revealedToken} size={132} />
+              <QRCodeSVG value={revealedToken} size={180} />
             </div>
           ) : (
             <p className="status-meta">
@@ -319,7 +319,7 @@ export function WithdrawalStatusCard({
         <div className="status-block nested">
           <p>Scan this Cashu payment request to fund the withdrawal.</p>
           <div className="qr-card">
-            <QRCodeSVG value={paymentRequest.creq} size={132} />
+            <QRCodeSVG value={paymentRequest.creq} size={180} />
             <CopyButton label="Copy payment request" text={paymentRequest.creq} />
           </div>
           {paymentExpiresAt && (

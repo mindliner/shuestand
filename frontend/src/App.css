@@ -760,33 +760,13 @@ aside h2 {
   margin: 1rem 0;
 }
 
-.fee-mode-options {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-
-.fee-mode-option {
-  display: flex;
-  gap: 0.6rem;
-  align-items: center;
-  border: 1px solid var(--color-border);
+.fee-mode-select {
+  width: 100%;
   border-radius: 10px;
-  padding: 0.35rem 0.65rem;
-}
-
-.fee-mode-option input {
-  margin: 0;
-}
-
-.fee-mode-option.disabled {
-  opacity: 0.5;
-}
-
-.fee-mode-rate {
-  display: block;
-  font-size: 0.8rem;
-  color: var(--color-helper);
+  border: 1px solid var(--color-input-border);
+  background: var(--color-input-bg);
+  color: var(--color-input-text);
+  padding: 0.45rem 0.6rem;
 }
 
 .balance-grid {
@@ -975,6 +955,15 @@ aside h2 {
 
 .operator-table .compact {
   white-space: nowrap;
+}
+
+.ledger-liability-rows {
+  margin-top: 0.35rem;
+}
+
+.ledger-liability-rows .status-meta {
+  margin: 0.15rem 0;
+  font-size: 0.8rem;
 }
 
 .actions-cell {
