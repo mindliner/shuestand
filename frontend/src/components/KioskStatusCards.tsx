@@ -123,6 +123,18 @@ export function DepositStatusCard({
   )
   const topUpWindow = getTopUpWindow(deposit, pendingDepositTtlSecs, nowMs)
   const remainingTopUpSats = Math.max(0, deposit.amount_sats - (deposit.received_sats ?? 0))
+  const depositStages =
+    deposit.state === 'partial_payment_received'
+      ? DEPOSIT_STAGES
+      : DEPOSIT_STAGES.map((stage) =>
+          stage.key === 'partial_payment_received'
+            ? {
+                ...stage,
+                label: 'Payment received',
+                helper: 'Payment detected on-chain',
+              }
+            : stage,
+        )
 
   return (
     <div className="status-block">
@@ -214,8 +226,8 @@ export function DepositStatusCard({
       <StatusTimeline
         stages={
           deposit.state === 'failed'
-            ? DEPOSIT_STAGES
-            : DEPOSIT_STAGES.filter((stage) => stage.key !== 'failed')
+            ? depositStages
+            : depositStages.filter((stage) => stage.key !== 'failed')
         }
         current={deposit.state}
       />
