@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import {
+  ApiClientError,
   createCashuInvoice,
   getCashuInvoice,
   getCashuWalletBalance,
@@ -98,14 +99,18 @@ type OngoingTransactionEntry =
   | { type: 'dep'; timestamp: number; createdAtLabel: string; deposit: Deposit }
 
 export function OperatorPanel() {
-  const storedToken =
+  const [tokenInput, setTokenInput] = useState(() =>
     typeof window !== 'undefined'
       ? window.localStorage.getItem(TOKEN_STORAGE_KEY) ?? ''
-      : ''
-
-  const [tokenInput, setTokenInput] = useState(storedToken)
-  const [token, setToken] = useState(storedToken)
+      : '',
+  )
+  const [token, setToken] = useState(() =>
+    typeof window !== 'undefined'
+      ? window.localStorage.getItem(TOKEN_STORAGE_KEY) ?? ''
+      : '',
+  )
   const [feedback, setFeedback] = useState<string | null>(null)
+  const hasToken = token.trim().length > 0
 
   const [payoutForm, setPayoutForm] = useState({
     address: '',
@@ -131,32 +136,40 @@ export function OperatorPanel() {
 
   const queryClient = useQueryClient()
 
+  const modeQuery = useQuery({
+    queryKey: ['operation-mode', token],
+    queryFn: () => getOperationMode(token),
+    enabled: hasToken,
+    refetchInterval: hasToken ? 15000 : false,
+  })
+
+  const tokenRejected =
+    hasToken &&
+    modeQuery.isError &&
+    modeQuery.error instanceof ApiClientError &&
+    (modeQuery.error.status === 401 || modeQuery.error.status === 403)
+
+  const tokenValidated = hasToken && modeQuery.isSuccess
+
   const balanceQuery = useQuery({
     queryKey: ['wallet-balance', token],
     queryFn: () => getWalletBalance(token),
-    enabled: Boolean(token),
-    refetchInterval: token ? 15000 : false,
+    enabled: tokenValidated,
+    refetchInterval: tokenValidated ? 15000 : false,
   })
 
   const cashuBalanceQuery = useQuery({
     queryKey: ['cashu-balance', token],
     queryFn: () => getCashuWalletBalance(token),
-    enabled: Boolean(token),
-    refetchInterval: token ? 15000 : false,
+    enabled: tokenValidated,
+    refetchInterval: tokenValidated ? 15000 : false,
   })
 
   const topupQuery = useQuery({
     queryKey: ['wallet-topup', token],
     queryFn: () => getWalletTopup(token),
-    enabled: Boolean(token),
+    enabled: tokenValidated,
     refetchInterval: false,
-  })
-
-  const modeQuery = useQuery({
-    queryKey: ['operation-mode', token],
-    queryFn: () => getOperationMode(token),
-    enabled: Boolean(token),
-    refetchInterval: token ? 15000 : false,
   })
 
   const modeMutation = useMutation({
@@ -215,7 +228,7 @@ export function OperatorPanel() {
   const invoiceQuery = useQuery({
     queryKey: ['cashu-invoice', token, activeQuoteId],
     queryFn: () => getCashuInvoice(token, activeQuoteId as string),
-    enabled: Boolean(token && activeQuoteId),
+    enabled: tokenValidated && Boolean(activeQuoteId),
     refetchInterval: (query) => {
       const state = (query.state.data as any)?.state as string | undefined
       if (!state) return 5000
@@ -227,20 +240,21 @@ export function OperatorPanel() {
   const transactionCounterQuery = useQuery({
     queryKey: ['transaction-counter', token],
     queryFn: () => getTransactionCounter(token),
-    enabled: Boolean(token),
-    refetchInterval: token ? 60000 : false,
+    enabled: tokenValidated,
+    refetchInterval: tokenValidated ? 60000 : false,
   })
 
   const transactionStatsQuery = useQuery({
     queryKey: ['transaction-stats', token],
     queryFn: () => getTransactionStats(token),
-    enabled: Boolean(token),
-    refetchInterval: token ? 60000 : false,
+    enabled: tokenValidated,
+    refetchInterval: tokenValidated ? 60000 : false,
   })
 
   const publicConfigQuery = useQuery({
     queryKey: ['public-config'],
     queryFn: getPublicConfig,
+    enabled: tokenValidated,
     staleTime: 5 * 60 * 1000,
   })
 
@@ -261,7 +275,7 @@ export function OperatorPanel() {
   const invoice = invoiceQuery.data
 
   useEffect(() => {
-    if (!invoice || !token) {
+    if (!invoice || !tokenValidated) {
       return
     }
     if (invoice.state.toLowerCase() === 'issued') {
@@ -335,29 +349,29 @@ export function OperatorPanel() {
   const floatStatusQuery = useQuery({
     queryKey: ['float-status', token],
     queryFn: () => getFloatStatus(token),
-    enabled: Boolean(token),
-    refetchInterval: token ? 10000 : false,
+    enabled: tokenValidated,
+    refetchInterval: tokenValidated ? 10000 : false,
   })
 
   const ledgerQuery = useQuery({
     queryKey: ['ledger', token],
     queryFn: () => getLedgerSnapshot(token),
-    enabled: Boolean(token),
-    refetchInterval: token ? 15000 : false,
+    enabled: tokenValidated,
+    refetchInterval: tokenValidated ? 15000 : false,
   })
 
   const cleanupQuery = useQuery({
     queryKey: ['operator-withdrawals', token],
     queryFn: () => listOperatorWithdrawals(token),
-    enabled: Boolean(token),
-    refetchInterval: token ? 20000 : false,
+    enabled: tokenValidated,
+    refetchInterval: tokenValidated ? 20000 : false,
   })
 
   const depositCleanupQuery = useQuery({
     queryKey: ['operator-deposits', token],
     queryFn: () => listOperatorDeposits(token),
-    enabled: Boolean(token),
-    refetchInterval: token ? 20000 : false,
+    enabled: tokenValidated,
+    refetchInterval: tokenValidated ? 20000 : false,
   })
 
   const floatStatus = floatStatusQuery.data
@@ -428,12 +442,12 @@ export function OperatorPanel() {
   }
 
   const canSendOnchain =
-    Boolean(token) &&
+    tokenValidated &&
     payoutForm.address.trim().length > 0 &&
     Number(payoutForm.amount) > 0 &&
     Number(payoutForm.feeRate) > 0
 
-  const canSendCashu = Boolean(token) && Number(cashuPayoutAmount) > 0
+  const canSendCashu = tokenValidated && Number(cashuPayoutAmount) > 0
 
   const cleanupItems = cleanupQuery.data ?? []
 
@@ -481,10 +495,13 @@ export function OperatorPanel() {
   }, [cleanupItems, depositItems])
 
   useEffect(() => {
+    if (!tokenValidated) {
+      return
+    }
     if (logLive) {
       setLogEntries(computedLogEntries)
     }
-  }, [computedLogEntries, logLive])
+  }, [computedLogEntries, logLive, tokenValidated])
 
   const handleManualLogRefresh = () => setLogEntries(computedLogEntries)
 
@@ -609,12 +626,18 @@ export function OperatorPanel() {
         <button type="button" onClick={handleSaveToken}>
           {token ? 'Update token' : 'Set token'}
         </button>
-        {!token && (
+        {!hasToken && (
           <p className="status-error">Token required for operator actions.</p>
+        )}
+        {hasToken && modeQuery.isLoading && (
+          <p className="status-meta">Checking API token…</p>
+        )}
+        {tokenRejected && (
+          <p className="status-error">Invalid API token.</p>
         )}
       </section>
 
-      {token && (
+      {tokenValidated && (
         <>
           <section className="operator-card">
             <div className="operator-card-header">
@@ -625,35 +648,73 @@ export function OperatorPanel() {
                 </span>
               )}
             </div>
-            {modeQuery.isLoading ? (
+            <>
+              <p>{modeDescriptions[currentMode]}</p>
+              <div className="button-row segmented">
+                {modeOptions.map(({ value, label }) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className={value === currentMode ? 'primary' : 'secondary'}
+                    onClick={() => handleModeChange(value)}
+                    disabled={modeMutation.isPending || value === currentMode}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {modeMutation.isPending && (
+                <p className="status-meta">Updating mode…</p>
+              )}
+              {modeMutation.isError && (
+                <p className="status-error">
+                  {(modeMutation.error as Error).message}
+                </p>
+              )}
+            </>
+          </section>
+
+          <section className="operator-card">
+            <div className="operator-card-header">
+              <div className="operator-card-title">
+                <h3>Stats</h3>
+              </div>
+              <label className="status-meta">
+                Period
+                <select
+                  className="inline-select"
+                  value={statsRange}
+                  onChange={(e) => setStatsRange(e.target.value as '24h' | '7d' | '30d')}
+                >
+                  <option value="24h">24h</option>
+                  <option value="7d">7d</option>
+                  <option value="30d">30d</option>
+                </select>
+              </label>
+            </div>
+            {transactionStatsQuery.isLoading ? (
               <p>Loading…</p>
-            ) : modeQuery.isError ? (
-              <p className="status-error">{(modeQuery.error as Error).message}</p>
+            ) : transactionStatsQuery.isError ? (
+              <p className="status-error">{(transactionStatsQuery.error as Error).message}</p>
             ) : (
-              <>
-                <p>{modeDescriptions[currentMode]}</p>
-                <div className="button-row segmented">
-                  {modeOptions.map(({ value, label }) => (
-                    <button
-                      key={value}
-                      type="button"
-                      className={value === currentMode ? 'primary' : 'secondary'}
-                      onClick={() => handleModeChange(value)}
-                      disabled={modeMutation.isPending || value === currentMode}
-                    >
-                      {label}
-                    </button>
-                  ))}
+              <div className="stats-grid">
+                <div>
+                  <span className="status-meta">Anzahl tx ({statsRange})</span>
+                  <strong>{statsData.tx_count.toLocaleString('en-US')}</strong>
                 </div>
-                {modeMutation.isPending && (
-                  <p className="status-meta">Updating mode…</p>
-                )}
-                {modeMutation.isError && (
-                  <p className="status-error">
-                    {(modeMutation.error as Error).message}
-                  </p>
-                )}
-              </>
+                <div>
+                  <span className="status-meta">Volumen C→B ({statsRange})</span>
+                  <strong>{formatSats(statsData.c_to_b_sats)} sats</strong>
+                </div>
+                <div>
+                  <span className="status-meta">Volumen B→C ({statsRange})</span>
+                  <strong>{formatSats(statsData.b_to_c_sats)} sats</strong>
+                </div>
+                <div>
+                  <span className="status-meta">Total completed</span>
+                  <strong>{(transactionCounterQuery.data?.count ?? 0).toLocaleString('en-US')}</strong>
+                </div>
+              </div>
             )}
           </section>
 
@@ -732,50 +793,6 @@ export function OperatorPanel() {
               </>
             ) : (
               <p>No ledger data yet.</p>
-            )}
-          </section>
-
-          <section className="operator-card">
-            <div className="operator-card-header">
-              <div className="operator-card-title">
-                <h3>Stats</h3>
-              </div>
-              <label className="status-meta">
-                Period
-                <select
-                  className="inline-select"
-                  value={statsRange}
-                  onChange={(e) => setStatsRange(e.target.value as '24h' | '7d' | '30d')}
-                >
-                  <option value="24h">24h</option>
-                  <option value="7d">7d</option>
-                  <option value="30d">30d</option>
-                </select>
-              </label>
-            </div>
-            {transactionStatsQuery.isLoading ? (
-              <p>Loading…</p>
-            ) : transactionStatsQuery.isError ? (
-              <p className="status-error">{(transactionStatsQuery.error as Error).message}</p>
-            ) : (
-              <div className="stats-grid">
-                <div>
-                  <span className="status-meta">Anzahl tx ({statsRange})</span>
-                  <strong>{statsData.tx_count.toLocaleString('en-US')}</strong>
-                </div>
-                <div>
-                  <span className="status-meta">Volumen C→B ({statsRange})</span>
-                  <strong>{formatSats(statsData.c_to_b_sats)} sats</strong>
-                </div>
-                <div>
-                  <span className="status-meta">Volumen B→C ({statsRange})</span>
-                  <strong>{formatSats(statsData.b_to_c_sats)} sats</strong>
-                </div>
-                <div>
-                  <span className="status-meta">Total completed</span>
-                  <strong>{(transactionCounterQuery.data?.count ?? 0).toLocaleString('en-US')}</strong>
-                </div>
-              </div>
             )}
           </section>
 

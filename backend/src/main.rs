@@ -824,6 +824,10 @@ async fn monitor_float_levels(
                                 drift_vs_target,
                                 delta,
                                 previous_total,
+                                onchain_snapshot.balance_sats,
+                                cashu_snapshot.balance_sats,
+                                reserved_onchain,
+                                reserved_cashu,
                             )
                             .await
                             {
@@ -857,6 +861,10 @@ async fn monitor_float_levels(
                             drift_vs_target,
                             delta,
                             previous_total,
+                            onchain_snapshot.balance_sats,
+                            cashu_snapshot.balance_sats,
+                            reserved_onchain,
+                            reserved_cashu,
                         )
                         .await
                         {
@@ -1084,6 +1092,10 @@ async fn emit_float_drift_alert(
     drift_sats: i64,
     delta_sats: i64,
     previous_total_sats: u64,
+    onchain_balance_sats: u64,
+    cashu_balance_sats: u64,
+    reserved_onchain_sats: u64,
+    reserved_cashu_sats: u64,
 ) -> Result<(), reqwest::Error> {
     let drift_label = if drift_sats > 0 {
         "deficit"
@@ -1093,16 +1105,35 @@ async fn emit_float_drift_alert(
         "balanced"
     };
 
+    let onchain_effective_sats = onchain_balance_sats.saturating_sub(reserved_onchain_sats);
+    let cashu_effective_sats = cashu_balance_sats.saturating_sub(reserved_cashu_sats);
+    let target_total_sats = target_sats.saturating_mul(2);
+    let funding_delta_vs_total_sats = total_balance_sats as i64 - target_total_sats as i64;
+    let onchain_delta_vs_pool_target_sats = onchain_effective_sats as i64 - target_sats as i64;
+    let cashu_delta_vs_pool_target_sats = cashu_effective_sats as i64 - target_sats as i64;
+
     let payload = json!({
         "event": "float_drift_alert",
+        "alert_title": "Funding Update",
         "state": state,
         "total_balance_sats": total_balance_sats,
         "target_sats": target_sats,
+        "target_per_pool_sats": target_sats,
+        "target_total_sats": target_total_sats,
+        "funding_delta_vs_total_sats": funding_delta_vs_total_sats,
         "drift_sats": drift_sats,
         "drift_abs_sats": drift_sats.unsigned_abs(),
         "drift_label": drift_label,
         "delta_sats": delta_sats,
         "previous_total_sats": previous_total_sats,
+        "onchain_balance_sats": onchain_balance_sats,
+        "cashu_balance_sats": cashu_balance_sats,
+        "reserved_onchain_sats": reserved_onchain_sats,
+        "reserved_cashu_sats": reserved_cashu_sats,
+        "onchain_effective_sats": onchain_effective_sats,
+        "cashu_effective_sats": cashu_effective_sats,
+        "onchain_delta_vs_pool_target_sats": onchain_delta_vs_pool_target_sats,
+        "cashu_delta_vs_pool_target_sats": cashu_delta_vs_pool_target_sats,
     });
     post_float_alert(url, payload).await
 }
