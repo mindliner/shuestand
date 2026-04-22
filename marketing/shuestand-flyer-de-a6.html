@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shuestand – QR Flyer</title>
+  <style>
+    @page { size: A6 portrait; margin: 10mm; }
+    body {
+      margin: 0;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #111827;
+      background: #f8fafc;
+    }
+    .card {
+      box-sizing: border-box;
+      width: 100%;
+      min-height: calc(100vh - 20mm);
+      border: 1.5px solid #dbe3ea;
+      border-radius: 16px;
+      background: white;
+      padding: 10mm;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6mm;
+      text-align: center;
+    }
+    h1 { margin: 0; font-size: 16pt; color: #0f172a; }
+    p { margin: 0; line-height: 1.35; }
+    .lead { font-size: 10.5pt; color: #1f2937; }
+    .small { font-size: 9pt; color: #475569; }
+    .qr-wrap {
+      background: linear-gradient(180deg, #f8fafc, #f1f5f9);
+      border: 1px solid #dbe3ea;
+      border-radius: 14px;
+      padding: 5mm;
+    }
+    .qr { width: 42mm; height: 42mm; display: block; }
+    .url { font-size: 8pt; color: #64748b; word-break: break-all; }
+    .cta { font-weight: 700; color: #0f172a; font-size: 10pt; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Shuestand</h1>
+    <p class="lead">Bitcoin ↔ Cashu einfach tauschen, direkt im Browser, ohne App-Installation.</p>
+
+    <div class="qr-wrap">
+      <img class="qr" src="shuestand-qr.png" alt="QR-Code zu Shuestand" />
+    </div>
+
+    <p class="cta">Jetzt ausprobieren:</p>
+    <p class="url">https://shuestand.mountainlake.io/</p>
+    <p class="small">Shuestand ist ein einfacher Kiosk für den schnellen Wechsel zwischen On-Chain-Bitcoin und Cashu eCash – ideal für Demos, Events und erste Schritte.</p>
+  </main>
+</body>
+</html>
