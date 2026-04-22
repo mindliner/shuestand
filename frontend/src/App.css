@@ -310,13 +310,19 @@ form button:disabled {
 }
 
 .session-actions-large {
-  align-items: flex-end;
+  flex-direction: column;
+  align-items: flex-start;
 }
 
 .session-actions-large .resume-form {
+  width: 100%;
+}
+
+.session-actions-large .resume-row {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+  width: 100%;
 }
 
 .session-actions-large .resume-form label {
@@ -324,8 +330,24 @@ form button:disabled {
   color: var(--color-helper);
 }
 
-.session-actions-large .resume-form button {
-  align-self: flex-start;
+.session-actions-large .resume-form label input {
+  width: 100%;
+}
+
+@media (min-width: 900px) {
+  .session-actions-large .resume-row {
+    flex-direction: row;
+    align-items: flex-end;
+  }
+
+  .session-actions-large .resume-form label {
+    flex: 1;
+  }
+
+  .session-actions-large .resume-form button {
+    white-space: nowrap;
+    align-self: flex-end;
+  }
 }
 
 .session-summary-card {
@@ -386,6 +408,7 @@ form button:disabled {
 }
 
 .session-actions-large > button[type='button'] {
+  align-self: center;
   background: linear-gradient(120deg, #d6c3a8, #98aed8);
   color: #141327;
   border: none;

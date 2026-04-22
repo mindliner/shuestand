@@ -1004,9 +1004,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
         ) : !hasSession ? (
             <div className="session-card hero">
               <p className="eyebrow">Work session</p>
-            <h2>Start or resume to get going</h2>
+            <h2>New here? Start a new session first</h2>
             <p className="helper lead">
-              Every kiosk or operator action belongs to a work session so you can pause, resume, and audit safely.
+              First-time customers should begin with a new session. If you already have a claim code, use resume below.
             </p>
             <div className="session-actions-large">
               <button
@@ -1017,24 +1017,26 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                 {sessionBusy ? 'Starting…' : 'Start new session'}
               </button>
               <form className="resume-form" onSubmit={handleResumeSession}>
-                <label>
-                  Claim code
-                  <input
-                    type="text"
-                    value={resumeCode}
-                    onChange={(e) => setResumeCode(e.target.value)}
-                    placeholder="ABCD-EFGH-IJKL-MNOP"
-                  />
-                </label>
-                <button
-                  type="submit"
-                  disabled={sessionBusy || !resumeCode.trim()}
-                >
-                  Resume session
-                </button>
+                <div className="resume-row">
+                  <label>
+                    Claim code (returning customers)
+                    <input
+                      type="text"
+                      value={resumeCode}
+                      onChange={(e) => setResumeCode(e.target.value)}
+                      placeholder="ABCD-EFGH-IJKL-MNOP"
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    disabled={sessionBusy || !resumeCode.trim()}
+                  >
+                    Resume session
+                  </button>
+                </div>
               </form>
             </div>
-            <p className="helper subtle">Claim codes expire automatically — copy them somewhere safe.</p>
+            <p className="helper subtle">Claim codes expire automatically, copy them somewhere safe.</p>
             {message && <p className="message">{message}</p>}
           </div>
         ) : (
