@@ -8,6 +8,8 @@
     @page { size: A6 portrait; margin: 10mm; }
     body {
       margin: 0;
+      padding: 10mm;
+      box-sizing: border-box;
       font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       color: #111827;
       background: #f8fafc;
@@ -15,30 +17,29 @@
     .card {
       box-sizing: border-box;
       width: 100%;
-      min-height: calc(100vh - 20mm);
       border: 1.5px solid #dbe3ea;
       border-radius: 16px;
       background: white;
-      padding: 10mm;
+      padding: 8mm;
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 6mm;
+      gap: 4.5mm;
       text-align: center;
     }
-    h1 { margin: 0; font-size: 16pt; color: #0f172a; }
-    p { margin: 0; line-height: 1.35; }
-    .lead { font-size: 10.5pt; color: #1f2937; }
-    .small { font-size: 9pt; color: #475569; }
+    h1 { margin: 0; font-size: 15pt; color: #0f172a; }
+    p { margin: 0; line-height: 1.32; max-width: 100%; }
+    .lead { font-size: 9.8pt; color: #1f2937; }
+    .small { font-size: 8.2pt; color: #475569; overflow-wrap: anywhere; }
     .qr-wrap {
       background: linear-gradient(180deg, #f8fafc, #f1f5f9);
       border: 1px solid #dbe3ea;
       border-radius: 14px;
       padding: 5mm;
     }
-    .qr { width: 42mm; height: 42mm; display: block; }
-    .url { font-size: 8pt; color: #64748b; word-break: break-all; }
-    .cta { font-weight: 700; color: #0f172a; font-size: 10pt; }
+    .qr { width: 40mm; height: 40mm; display: block; }
+    .url { font-size: 7.8pt; color: #64748b; word-break: break-word; overflow-wrap: anywhere; }
+    .cta { font-weight: 700; color: #0f172a; font-size: 9.6pt; }
   </style>
 </head>
 <body>
@@ -52,7 +53,7 @@
 
     <p class="cta">Jetzt ausprobieren:</p>
     <p class="url">https://shuestand.mountainlake.io/</p>
-    <p class="small">Shuestand ist ein einfacher Kiosk für den schnellen Wechsel zwischen On-Chain-Bitcoin und Cashu eCash – ideal für Demos, Events und erste Schritte.</p>
+    <p class="small">Shuestand ist ein einfacher Kiosk für den schnellen Wechsel zwischen On-Chain-Bitcoin und Cashu eCash. Ideal für Demos, Events und erste Schritte.</p>
   </main>
 </body>
 </html>
