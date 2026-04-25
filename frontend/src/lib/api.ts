@@ -88,6 +88,13 @@ async function parseJson(res: Response) {
   try {
     return JSON.parse(text)
   } catch (err) {
+    if (!res.ok) {
+      const message = text.trim() || `Request failed with status ${res.status}`
+      return {
+        code: 'non_json_error',
+        message,
+      }
+    }
     throw new ApiClientError(
       'Malformed JSON response from backend',
       res.status,
