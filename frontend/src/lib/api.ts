@@ -25,6 +25,9 @@ import type {
   OperatorWithdrawalListParams,
   OperatorDepositListParams,
   OperatorDepositActionRequest,
+  SupportMessage,
+  OperatorSessionDetails,
+  SupportCaseSummary,
   PublicConfigResponse,
   OperationModeResponse,
   OperationMode,
@@ -367,4 +370,70 @@ export function getTransactionStats(token: string): Promise<TransactionStatsResp
   return request<TransactionStatsResponse>('/api/v1/operator/transactions/stats', {
     headers: jsonHeaders(token),
   })
+}
+
+export function submitSupportMessage(
+  sessionToken: string,
+  payload: { message: string; context?: Record<string, unknown> },
+): Promise<SupportMessage> {
+  return request<SupportMessage>('/api/v1/support/messages', {
+    method: 'POST',
+    headers: sessionHeaders(sessionToken),
+    body: JSON.stringify(payload),
+  })
+}
+
+export function listOperatorSupportMessages(
+  token: string,
+  sessionId: string,
+  limit = 200,
+): Promise<SupportMessage[]> {
+  const search = new URLSearchParams()
+  search.set('session_id', sessionId)
+  search.set('limit', String(limit))
+  return request<SupportMessage[]>(`/api/v1/operator/support/messages?${search.toString()}`, {
+    headers: jsonHeaders(token),
+  })
+}
+
+export function getOperatorSessionDetails(
+  token: string,
+  sessionId: string,
+): Promise<OperatorSessionDetails> {
+  return request<OperatorSessionDetails>(
+    `/api/v1/operator/sessions/${encodeURIComponent(sessionId)}/details`,
+    {
+      headers: jsonHeaders(token),
+    },
+  )
+}
+
+export function listOperatorSupportCases(
+  token: string,
+  params?: { status?: string; sessionId?: string; limit?: number },
+): Promise<SupportCaseSummary[]> {
+  const search = new URLSearchParams()
+  if (params?.status) search.set('status', params.status)
+  if (params?.sessionId) search.set('session_id', params.sessionId)
+  if (typeof params?.limit === 'number') search.set('limit', String(params.limit))
+  const qs = search.toString()
+  const suffix = qs ? `?${qs}` : ''
+  return request<SupportCaseSummary[]>(`/api/v1/operator/support/cases${suffix}`, {
+    headers: jsonHeaders(token),
+  })
+}
+
+export function updateOperatorSupportCaseStatus(
+  token: string,
+  sessionId: string,
+  status: 'open' | 'closed',
+): Promise<SupportCaseSummary> {
+  return request<SupportCaseSummary>(
+    `/api/v1/operator/support/cases/${encodeURIComponent(sessionId)}/status`,
+    {
+      method: 'POST',
+      headers: jsonHeaders(token),
+      body: JSON.stringify({ status }),
+    },
+  )
 }

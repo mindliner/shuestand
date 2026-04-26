@@ -9,6 +9,7 @@ use sqlx::{
     postgres::{PgPoolOptions, PgRow},
 };
 use std::str::FromStr;
+use uuid::Uuid;
 
 const DEPOSIT_SELECT_FIELDS: &str = "id, amount_sats, received_sats, state, address, target_confirmations, delivery_hint, metadata, txid, confirmations, last_checked_at, created_at, updated_at, minted_token, minted_amount_sats, token_ready_at, mint_attempt_count, last_mint_attempt_at, mint_error, delivery_attempt_count, last_delivery_attempt_at, delivery_error, pickup_token, pickup_revealed_at, session_id, transaction_counted_at";
 const TRANSACTION_COUNTER_KEY: &str = "transaction_counter";
@@ -16,6 +17,24 @@ const TRANSACTION_COUNTER_KEY: &str = "transaction_counter";
 #[derive(Clone)]
 pub struct Database {
     pub(crate) pool: PgPool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SupportMessage {
+    pub id: String,
+    pub session_id: String,
+    pub source: String,
+    pub message: String,
+    pub context: Option<Value>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SupportCaseSummary {
+    pub session_id: String,
+    pub status: String,
+    pub message_count: u64,
+    pub latest_message_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,6 +390,21 @@ impl Database {
         }
 
         let rows = query.fetch_all(&self.pool).await?;
+        rows.into_iter().map(Self::map_withdrawal).collect()
+    }
+
+    pub async fn list_withdrawals_by_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<Withdrawal>, Error> {
+        let rows = sqlx::query(
+            r#"SELECT id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at, session_id
+            FROM withdrawals WHERE session_id = $1 ORDER BY created_at ASC"#,
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+
         rows.into_iter().map(Self::map_withdrawal).collect()
     }
 
@@ -771,6 +805,172 @@ impl Database {
 
         let rows = query.fetch_all(&self.pool).await?;
         rows.into_iter().map(Self::map_deposit).collect()
+    }
+
+    pub async fn list_deposits_by_session(&self, session_id: &str) -> Result<Vec<Deposit>, Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {} FROM deposits WHERE session_id = $1 ORDER BY created_at ASC",
+            DEPOSIT_SELECT_FIELDS
+        ))
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(Self::map_deposit).collect()
+    }
+
+    pub async fn create_support_message(
+        &self,
+        session_id: &str,
+        source: &str,
+        message: &str,
+        context: Option<Value>,
+    ) -> Result<SupportMessage, Error> {
+        let created_at = Utc::now();
+        let id = Uuid::new_v4().to_string();
+        let ts = created_at.to_rfc3339();
+        sqlx::query(
+            r#"INSERT INTO support_messages (id, session_id, source, message, context, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)"#,
+        )
+        .bind(&id)
+        .bind(session_id)
+        .bind(source)
+        .bind(message)
+        .bind(context.clone())
+        .bind(&ts)
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"INSERT INTO support_cases (session_id, status, created_at, updated_at, closed_at)
+            VALUES ($1, 'open', $2, $2, NULL)
+            ON CONFLICT (session_id)
+            DO UPDATE SET status = 'open', updated_at = EXCLUDED.updated_at, closed_at = NULL"#,
+        )
+        .bind(session_id)
+        .bind(&ts)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(SupportMessage {
+            id,
+            session_id: session_id.to_string(),
+            source: source.to_string(),
+            message: message.to_string(),
+            context,
+            created_at,
+        })
+    }
+
+    pub async fn list_support_messages_by_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SupportMessage>, Error> {
+        let rows = sqlx::query(
+            r#"SELECT id, session_id, source, message, context, created_at
+            FROM support_messages WHERE session_id = $1 ORDER BY created_at DESC"#,
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(SupportMessage {
+                    id: row.try_get("id")?,
+                    session_id: row.try_get("session_id")?,
+                    source: row.try_get("source")?,
+                    message: row.try_get("message")?,
+                    context: row.try_get("context")?,
+                    created_at: parse_timestamp(row.try_get("created_at")?, "created_at")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn count_support_messages_since(
+        &self,
+        session_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<u64, Error> {
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COUNT(*)::BIGINT AS total
+               FROM support_messages
+               WHERE session_id = $1 AND created_at >= $2"#,
+        )
+        .bind(session_id)
+        .bind(since.to_rfc3339())
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count.max(0) as u64)
+    }
+
+    pub async fn list_support_cases(
+        &self,
+        status: Option<&str>,
+        session_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SupportCaseSummary>, Error> {
+        let rows = sqlx::query(
+            r#"SELECT c.session_id,
+                      c.status,
+                      COUNT(m.id)::BIGINT AS message_count,
+                      MAX(m.created_at) AS latest_message_at
+               FROM support_cases c
+               JOIN support_messages m ON m.session_id = c.session_id
+               WHERE ($1::TEXT IS NULL OR c.status = $1)
+                 AND ($2::TEXT IS NULL OR c.session_id ILIKE ('%' || $2 || '%'))
+               GROUP BY c.session_id, c.status
+               HAVING COUNT(m.id) > 0
+               ORDER BY MAX(m.created_at) DESC
+               LIMIT $3"#,
+        )
+        .bind(status)
+        .bind(session_filter)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(SupportCaseSummary {
+                    session_id: row.try_get("session_id")?,
+                    status: row.try_get("status")?,
+                    message_count: row.try_get::<i64, _>("message_count")?.max(0) as u64,
+                    latest_message_at: parse_timestamp(
+                        row.try_get("latest_message_at")?,
+                        "latest_message_at",
+                    )?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn set_support_case_status(
+        &self,
+        session_id: &str,
+        status: &str,
+    ) -> Result<(), Error> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"UPDATE support_cases
+               SET status = $2,
+                   updated_at = $3,
+                   closed_at = CASE WHEN $2 = 'closed' THEN $3 ELSE NULL END
+               WHERE session_id = $1"#,
+        )
+        .bind(session_id)
+        .bind(status)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+        Ok(())
     }
 
     pub async fn count_deposits_for_session_states(
@@ -1228,6 +1428,17 @@ impl Database {
         Self::map_session(row)
     }
 
+    pub async fn fetch_session_by_id(&self, id: &str) -> Result<Session, Error> {
+        let row = sqlx::query(
+            r#"SELECT id, token_hash, created_at, last_seen_at, expires_at FROM sessions WHERE id = $1"#,
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Self::map_session(row)
+    }
+
     pub async fn touch_session(
         &self,
         id: &str,
@@ -1355,7 +1566,6 @@ pub struct Deposit {
     pub minted_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    #[serde(skip_serializing)]
     pub pickup_token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pickup_revealed_at: Option<DateTime<Utc>>,

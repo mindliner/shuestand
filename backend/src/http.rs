@@ -26,8 +26,8 @@ use uuid::Uuid;
 use crate::AppState;
 use backend::cashu::{TokenMintError, token_fingerprint, token_mint_url, token_total_amount};
 use backend::db::{
-    Deposit, DepositState, PaymentRequestRecordOutcome, Session, StateLiabilityRow, Withdrawal,
-    WithdrawalState,
+    Deposit, DepositState, PaymentRequestRecordOutcome, Session, StateLiabilityRow,
+    SupportCaseSummary, SupportMessage, Withdrawal, WithdrawalState,
 };
 use backend::fees::FeeEstimateSnapshot;
 use backend::onchain::{OnchainBalance, OnchainWallet};
@@ -83,6 +83,8 @@ const SESSION_BURST_THRESHOLD_PER_SUBNET: usize = 12;
 const MAX_GLOBAL_PENDING_DEPOSITS: u64 = 24;
 const OPERATOR_401_WINDOW_SECS: i64 = 60;
 const OPERATOR_401_THRESHOLD: usize = 20;
+const SUPPORT_MESSAGE_WINDOW_SECS: i64 = 300;
+const SUPPORT_MESSAGE_THRESHOLD_PER_SESSION: u64 = 5;
 const EMERGENCY_ESCALATION_WINDOW_SECS: i64 = 600;
 const MAX_API_BODY_BYTES: usize = 1024 * 1024;
 
@@ -99,6 +101,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/deposits", post(create_deposit))
         .route("/api/v1/deposits/:id", get(get_deposit))
         .route("/api/v1/deposits/:id/pickup", post(pickup_deposit))
+        .route("/api/v1/support/messages", post(submit_support_message))
         .route("/api/v1/withdrawals", post(request_withdrawal))
         .route("/api/v1/withdrawals/:id", get(get_withdrawal))
         .route(
@@ -139,6 +142,19 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/operator/transactions/stats",
             get(get_transaction_stats),
+        )
+        .route(
+            "/api/v1/operator/support/messages",
+            get(list_operator_support_messages),
+        )
+        .route("/api/v1/operator/support/cases", get(list_operator_support_cases))
+        .route(
+            "/api/v1/operator/support/cases/:session_id/status",
+            post(update_operator_support_case_status),
+        )
+        .route(
+            "/api/v1/operator/sessions/:id/details",
+            get(get_operator_session_details),
         )
         .route(
             "/api/v1/operator/mode",
@@ -476,6 +492,43 @@ struct OperatorListQuery {
     state: Vec<String>,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct SupportMessageRequest {
+    message: String,
+    #[serde(default)]
+    context: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, Default)]
+struct SupportMessagesQuery {
+    session_id: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
+struct SupportCasesQuery {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct SupportCaseStatusRequest {
+    status: String,
+}
+
+#[derive(Serialize)]
+struct OperatorSessionDetailsResponse {
+    session_id: String,
+    deposits: Vec<Deposit>,
+    withdrawals: Vec<WithdrawalView>,
+    support_messages: Vec<SupportMessage>,
 }
 
 #[derive(Deserialize)]
@@ -1098,6 +1151,60 @@ async fn pickup_deposit(
     Ok(Json(ApiResponse {
         data: DepositPickupResponse { token: minted },
     }))
+}
+
+async fn submit_support_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<SupportMessageRequest>,
+) -> ApiResult<SupportMessage> {
+    let session = resolve_session_from_headers(&state, &headers).await?;
+    let session = session.ok_or_else(|| unauthorized_session("session_required"))?;
+    let message = req.message.trim();
+    if message.is_empty() {
+        return Err(invalid_request("support_message_required"));
+    }
+    if message.chars().count() > 2048 {
+        return Err(invalid_request("support_message_too_long"));
+    }
+
+    let deposits = state.db.list_deposits_by_session(&session.id).await.map_err(server_error)?;
+    let withdrawals = state
+        .db
+        .list_withdrawals_by_session(&session.id)
+        .await
+        .map_err(server_error)?;
+    if deposits.is_empty() && withdrawals.is_empty() {
+        return Err(invalid_request(
+            "support is available after at least one deposit or withdrawal in this session",
+        ));
+    }
+
+    let recent_cutoff = Utc::now() - Duration::seconds(SUPPORT_MESSAGE_WINDOW_SECS);
+    let recent_count = state
+        .db
+        .count_support_messages_since(&session.id, recent_cutoff)
+        .await
+        .map_err(server_error)?;
+    if recent_count >= SUPPORT_MESSAGE_THRESHOLD_PER_SESSION {
+        return Err(too_many_requests(
+            "support_rate_limited",
+            "too many support messages for this session; please wait a few minutes",
+        ));
+    }
+
+    let saved = state
+        .db
+        .create_support_message(
+            &session.id,
+            "customer",
+            message,
+            req.context,
+        )
+        .await
+        .map_err(server_error)?;
+
+    Ok(Json(ApiResponse { data: saved }))
 }
 
 async fn request_withdrawal(
@@ -2073,6 +2180,158 @@ async fn list_operator_withdrawals(
         .collect();
 
     Ok(Json(ApiResponse { data: views }))
+}
+
+async fn list_operator_support_messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<SupportMessagesQuery>,
+) -> ApiResult<Vec<SupportMessage>> {
+    require_operator_token(&state, &headers)?;
+    let session_id = query
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid_request("session_id is required"))?;
+
+    let mut rows = state
+        .db
+        .list_support_messages_by_session(session_id)
+        .await
+        .map_err(server_error)?;
+    let limit = query.limit.unwrap_or(200).min(500);
+    if rows.len() > limit {
+        rows.truncate(limit);
+    }
+    Ok(Json(ApiResponse { data: rows }))
+}
+
+async fn list_operator_support_cases(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<SupportCasesQuery>,
+) -> ApiResult<Vec<SupportCaseSummary>> {
+    require_operator_token(&state, &headers)?;
+    let status = query
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(value) = status {
+        if value != "open" && value != "closed" {
+            return Err(invalid_request("status must be 'open' or 'closed'"));
+        }
+    }
+
+    let session_filter = query
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let limit = query.limit.unwrap_or(200).min(1000);
+
+    let rows = state
+        .db
+        .list_support_cases(status, session_filter, limit)
+        .await
+        .map_err(server_error)?;
+    Ok(Json(ApiResponse { data: rows }))
+}
+
+async fn update_operator_support_case_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(req): Json<SupportCaseStatusRequest>,
+) -> ApiResult<SupportCaseSummary> {
+    require_operator_token(&state, &headers)?;
+    let status = req.status.trim();
+    if status != "open" && status != "closed" {
+        return Err(invalid_request("status must be 'open' or 'closed'"));
+    }
+
+    state
+        .db
+        .set_support_case_status(session_id.trim(), status)
+        .await
+        .map_err(|err| match err {
+            sqlx::Error::RowNotFound => not_found("support_case_not_found"),
+            other => server_error(other),
+        })?;
+
+    let mut rows = state
+        .db
+        .list_support_cases(None, Some(session_id.trim()), 1)
+        .await
+        .map_err(server_error)?;
+    let summary = rows
+        .drain(..)
+        .next()
+        .ok_or_else(|| not_found("support_case_not_found"))?;
+
+    Ok(Json(ApiResponse { data: summary }))
+}
+
+async fn get_operator_session_details(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<OperatorSessionDetailsResponse> {
+    require_operator_token(&state, &headers)?;
+
+    let lookup = id.trim();
+    let session_id = match state.db.fetch_session_by_id(lookup).await {
+        Ok(session) => session.id,
+        Err(sqlx::Error::RowNotFound) => {
+            if let Some(normalized_claim) = normalize_claim_code(lookup) {
+                let token = format!("{}{}", SESSION_TOKEN_PREFIX, normalized_claim);
+                let token_hash = hash_session_token(&token);
+                match state.db.fetch_session_by_token_hash(&token_hash).await {
+                    Ok(session) => session.id,
+                    Err(sqlx::Error::RowNotFound) => return Err(not_found("session_not_found")),
+                    Err(err) => return Err(server_error(err)),
+                }
+            } else {
+                return Err(not_found("session_not_found"));
+            }
+        }
+        Err(err) => return Err(server_error(err)),
+    };
+
+    let deposits = state
+        .db
+        .list_deposits_by_session(&session_id)
+        .await
+        .map_err(server_error)?;
+    let withdrawals = state
+        .db
+        .list_withdrawals_by_session(&session_id)
+        .await
+        .map_err(server_error)?;
+    let support_messages = state
+        .db
+        .list_support_messages_by_session(&session_id)
+        .await
+        .map_err(server_error)?;
+
+    if deposits.is_empty() && withdrawals.is_empty() && support_messages.is_empty() {
+        return Err(not_found("session_not_found"));
+    }
+
+    let views = withdrawals
+        .into_iter()
+        .map(|wd| WithdrawalView::new(wd, state.cashu_mint_url.as_deref(), None))
+        .collect();
+
+    Ok(Json(ApiResponse {
+        data: OperatorSessionDetailsResponse {
+            session_id,
+            deposits,
+            withdrawals: views,
+            support_messages,
+        },
+    }))
 }
 
 async fn operate_deposit(

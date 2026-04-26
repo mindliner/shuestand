@@ -28,6 +28,7 @@ export interface Deposit {
   updated_at?: string | null
   delivery_error?: string | null
   session_id?: string | null
+  pickup_token?: string | null
 }
 
 export type WithdrawalState =
@@ -75,6 +76,29 @@ export interface OperatorWithdrawalListParams {
 export interface OperatorDepositListParams {
   states?: DepositState[]
   limit?: number
+}
+
+export interface SupportMessage {
+  id: string
+  session_id: string
+  source: string
+  message: string
+  context?: Record<string, unknown> | null
+  created_at: string
+}
+
+export interface OperatorSessionDetails {
+  session_id: string
+  deposits: Deposit[]
+  withdrawals: Withdrawal[]
+  support_messages: SupportMessage[]
+}
+
+export interface SupportCaseSummary {
+  session_id: string
+  status: 'open' | 'closed' | string
+  message_count: number
+  latest_message_at: string
 }
 
 export interface OperatorWithdrawalActionRequest {

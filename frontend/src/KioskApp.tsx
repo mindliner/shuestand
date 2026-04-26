@@ -114,6 +114,12 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   }))
   const navigate = useNavigate()
 
+  const routeToSupport = (reason: string) => {
+    const query = new URLSearchParams()
+    query.set('reason', reason)
+    navigate(`/support?${query.toString()}`)
+  }
+
   const showFloatingNotice = (text: string) => {
     setFloatingNotice(text)
     if (typeof window === 'undefined') {
@@ -600,10 +606,11 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
       return
     }
     const selected = deposits.find((entry) => entry.id === selectedDepositId)
-    if (!selected?.pickupToken) {
+    const pickupToken = selected?.pickupToken ?? latestDeposit?.pickup_token ?? null
+    if (!pickupToken) {
       return
     }
-    pickupMutation.mutate({ id: selectedDepositId, pickupToken: selected.pickupToken })
+    pickupMutation.mutate({ id: selectedDepositId, pickupToken })
   }
 
   const handleDeliveryAddressChange = (value: string) => {
@@ -628,6 +635,28 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     enabled: Boolean(selectedDepositId && sessionToken),
     refetchInterval: STATUS_REFRESH_MS,
   })
+
+  useEffect(() => {
+    if (!session?.id || !latestDeposit?.id || !latestDeposit.pickup_token) {
+      return
+    }
+
+    setDeposits((current) => {
+      let changed = false
+      const next = current.map((entry) => {
+        if (entry.id !== latestDeposit.id || entry.pickupToken) {
+          return entry
+        }
+        changed = true
+        return { ...entry, pickupToken: latestDeposit.pickup_token ?? null }
+      })
+
+      if (changed) {
+        persistDeposits(next, session.id)
+      }
+      return changed ? next : current
+    })
+  }, [latestDeposit?.id, latestDeposit?.pickup_token, session?.id])
 
   const {
     data: latestWithdrawal,
@@ -690,6 +719,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
       if (normalized) {
         setMessage(normalized.message)
       }
+      routeToSupport('pickup_error')
     },
   })
 
@@ -863,6 +893,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
       } else {
         setMessage(`Request error: ${(err as Error).message}`)
       }
+      routeToSupport('request_error')
     } finally {
       setSubmitting(false)
     }
@@ -892,6 +923,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   const selectedDeposit = selectedDepositId
     ? deposits.find((entry) => entry.id === selectedDepositId) ?? null
     : null
+  const effectivePickupToken =
+    selectedDeposit?.pickupToken ?? latestDeposit?.pickup_token ?? null
+  const supportVisible = deposits.length > 0 || withdrawals.length > 0
 
   const hasSession = Boolean(session)
   const headerTitle = hasSession ? 'Configure Your Swaps' : 'Shuestand: Onchain/Cashu Swaps'
@@ -990,6 +1024,15 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           >
             Operator console
           </button>
+          {supportVisible && (
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => routeToSupport('manual_support')}
+            >
+              Support
+            </button>
+          )}
         </div>
       </header>
 
@@ -1195,7 +1238,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                     isLoading={depositLoading}
                     hasSubmission={Boolean(selectedDepositId)}
                     pendingDepositTtlSecs={limits.pendingDepositTtlSecs}
-                    pickupToken={selectedDeposit?.pickupToken ?? null}
+                    pickupToken={effectivePickupToken}
                     revealedToken={selectedDepositId ? revealedTokens[selectedDepositId] ?? null : null}
                     onPickup={handleDepositPickup}
                     pickupPending={pickupMutation.isPending}

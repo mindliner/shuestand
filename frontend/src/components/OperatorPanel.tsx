@@ -22,6 +22,9 @@ import {
   getTransactionCounter,
   getTransactionStats,
   getPublicConfig,
+  getOperatorSessionDetails,
+  listOperatorSupportCases,
+  updateOperatorSupportCaseStatus,
 } from '../lib/api'
 import { CopyButton } from './KioskStatusCards'
 import type { FloatStatusResponse, OperatorWithdrawalActionRequest, OperatorDepositActionRequest, Withdrawal, Deposit, OperationMode, FeeEstimateEntry } from '../types/api'
@@ -133,6 +136,8 @@ export function OperatorPanel() {
   const [logEntries, setLogEntries] = useState<OperatorLogEntry[]>([])
   const [logLive, setLogLive] = useState(true)
   const [statsRange, setStatsRange] = useState<'24h' | '7d' | '30d'>('24h')
+  const [sessionLookupId, setSessionLookupId] = useState('')
+  const [supportSessionFilter, setSupportSessionFilter] = useState('')
 
   const queryClient = useQueryClient()
 
@@ -256,6 +261,31 @@ export function OperatorPanel() {
     queryFn: getPublicConfig,
     enabled: tokenValidated,
     staleTime: 5 * 60 * 1000,
+  })
+
+  const sessionDetailsMutation = useMutation({
+    mutationFn: () => getOperatorSessionDetails(token, sessionLookupId.trim()),
+  })
+
+  const supportCasesQuery = useQuery({
+    queryKey: ['support-cases', token, supportSessionFilter],
+    queryFn: () =>
+      listOperatorSupportCases(token, {
+        status: 'open',
+        sessionId: supportSessionFilter.trim() || undefined,
+        limit: 500,
+      }),
+    enabled: tokenValidated,
+    refetchInterval: tokenValidated ? 10000 : false,
+  })
+
+  const closeSupportCaseMutation = useMutation({
+    mutationFn: (sessionId: string) =>
+      updateOperatorSupportCaseStatus(token, sessionId, 'closed'),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['support-cases', token] })
+      setFeedback('Support case closed')
+    },
   })
 
   const feeEstimates = publicConfigQuery.data?.fee_estimates ?? null
@@ -1430,6 +1460,119 @@ export function OperatorPanel() {
       )}
 
       {feedback && <p className="operator-feedback">{feedback}</p>}
+
+      {tokenValidated && (
+        <section className="operator-card" style={{ marginTop: '1rem' }}>
+          <h3>Support Cases (Open)</h3>
+          <label>
+            Filter by Session ID (optional)
+            <input
+              type="text"
+              value={supportSessionFilter}
+              onChange={(e) => setSupportSessionFilter(e.target.value)}
+              placeholder="session-uuid oder Teilstring"
+            />
+          </label>
+          {supportCasesQuery.isError && (
+            <p className="status-error">{(supportCasesQuery.error as Error).message}</p>
+          )}
+          {supportCasesQuery.data && (
+            <div className="status-block nested">
+              {supportCasesQuery.data.length === 0 ? (
+                <p className="status-meta">No open support sessions.</p>
+              ) : (
+                <div className="operator-table-scroll">
+                  <table className="operator-table">
+                    <thead>
+                      <tr>
+                        <th>Session</th>
+                        <th>Messages</th>
+                        <th>Latest</th>
+                        <th>Status</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {supportCasesQuery.data.map((row) => (
+                        <tr key={row.session_id}>
+                          <td><code>{row.session_id}</code></td>
+                          <td>{row.message_count}</td>
+                          <td>{new Date(row.latest_message_at).toLocaleString()}</td>
+                          <td>{row.status}</td>
+                          <td>
+                            <div className="button-row">
+                              <button
+                                type="button"
+                                className="secondary"
+                                onClick={() => {
+                                  setSessionLookupId(row.session_id)
+                                  sessionDetailsMutation.mutate()
+                                }}
+                              >
+                                Open
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => closeSupportCaseMutation.mutate(row.session_id)}
+                                disabled={closeSupportCaseMutation.isPending}
+                              >
+                                Close
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          <h3 style={{ marginTop: '1rem' }}>Support / Session Lookup</h3>
+          <form
+            onSubmit={(evt) => {
+              evt.preventDefault()
+              if (!sessionLookupId.trim()) return
+              sessionDetailsMutation.mutate()
+            }}
+          >
+            <label>
+              Session ID or Claim code
+              <input
+                type="text"
+                value={sessionLookupId}
+                onChange={(e) => setSessionLookupId(e.target.value)}
+                placeholder="session-uuid oder 423DC7B0-E05E455E-..."
+              />
+            </label>
+            <button type="submit" disabled={sessionDetailsMutation.isPending || !sessionLookupId.trim()}>
+              {sessionDetailsMutation.isPending ? 'Loading…' : 'Load session details'}
+            </button>
+          </form>
+          {sessionDetailsMutation.isError && (
+            <p className="status-error">{(sessionDetailsMutation.error as Error).message}</p>
+          )}
+          {sessionDetailsMutation.data && (
+            <div className="status-block nested">
+              <p className="status-meta code">Session: {sessionDetailsMutation.data.session_id}</p>
+              <p className="status-meta">
+                Deposits: {sessionDetailsMutation.data.deposits.length} · Withdrawals: {sessionDetailsMutation.data.withdrawals.length} · Messages: {sessionDetailsMutation.data.support_messages.length}
+              </p>
+              {sessionDetailsMutation.data.support_messages.length > 0 && (
+                <ul className="archived-list">
+                  {sessionDetailsMutation.data.support_messages.slice(0, 10).map((msg) => (
+                    <li key={msg.id}>
+                      <span className="status-meta">{new Date(msg.created_at).toLocaleString()}</span>
+                      <span className="status-meta"><strong>{msg.source}</strong>: {msg.message}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </section>
+      )}
     </div>
   )
 }

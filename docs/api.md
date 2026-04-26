@@ -114,16 +114,38 @@ Response `201 Created`:
 ```json
 {
   "data": {
-    "id": "dep_01hxf...",
-    "address": "bc1q...",
-    "state": "pending",
-    "target_confirmations": 3
+    "deposit": {
+      "id": "dep_01hxf...",
+      "address": "bc1q...",
+      "state": "pending",
+      "target_confirmations": 3
+    },
+    "pickup_token": "pc_..."
   }
 }
 ```
 
 ### GET `/api/v1/deposits/{id}`
-Returns the full deposit object plus (when `state === "ready"`) a `token` field containing the Cashu token string and a `token_qr` payload for display. When `delivery_hint` refers to a wallet URL, the backend will attempt a push first and still return the token for fallback.
+Returns the full deposit object. When `state === "ready"`, the response includes `pickup_token` (session-bound) and the token can be claimed exactly once via pickup endpoint below.
+
+### POST `/api/v1/deposits/{id}/pickup`
+Request body:
+```json
+{ "pickup_token": "pc_..." }
+```
+
+Response `200 OK`:
+```json
+{
+  "data": {
+    "token": "cashuA1..."
+  }
+}
+```
+
+Notes:
+- One-shot claim: repeated pickup attempts return `deposit_not_ready_for_pickup`.
+- Endpoint is intentionally ambiguous on wrong token/already-claimed to avoid information leaks.
 
 ### POST `/api/v1/withdrawals`
 Request body:
@@ -147,6 +169,97 @@ Response `202 Accepted`:
 
 ### GET `/api/v1/withdrawals/{id}`
 Returns the withdrawal object including `txid`, `fee_paid_sats`, and `state` progression.
+
+### POST `/api/v1/support/messages`
+Session-authenticated support message for current case.
+
+Request body:
+```json
+{
+  "message": "I paid but did not receive the token.",
+  "context": { "reason": "pickup_error" }
+}
+```
+
+Response `200 OK`:
+```json
+{
+  "data": {
+    "id": "...",
+    "session_id": "...",
+    "source": "customer",
+    "message": "...",
+    "context": { "reason": "pickup_error" },
+    "created_at": "2026-04-26T12:00:00Z"
+  }
+}
+```
+
+Constraints:
+- Requires `X-Shuestand-Session`.
+- Allowed only after at least one deposit/withdrawal exists in the session.
+- `message` max length: **2048 characters**.
+- Rate limit: max **5 messages per session per 5 minutes** (`429 support_rate_limited`).
+
+## Operator support endpoints
+
+All require `Authorization: Bearer <WALLET_API_TOKEN>`.
+
+### GET `/api/v1/operator/support/messages?session_id={id}&limit={n}`
+Returns support messages for a session (newest first).
+
+### GET `/api/v1/operator/sessions/{id}/details`
+Load full support context for a session.
+
+`{id}` accepts either:
+- internal session UUID, or
+- customer claim code/session key.
+
+Response includes:
+- `session_id`
+- `deposits` (including historical/closed ones)
+- `withdrawals`
+- `support_messages`
+
+### GET `/api/v1/operator/support/cases?status=open&session_id={optional-filter}&limit={n}`
+Returns support-session summaries (grouped by session) with:
+- `session_id`
+- `status` (`open` or `closed`)
+- `message_count`
+- `latest_message_at`
+
+Typical operator usage is `status=open` so only unresolved support sessions appear.
+
+### POST `/api/v1/operator/support/cases/{session_id}/status`
+Request body:
+```json
+{ "status": "closed" }
+```
+
+Updates support-case status for a session (e.g., close after review).
+
+## Operator Support Playbook (Reklamationen)
+
+1. **Session laden**
+   - Im Operator-UI unter `Support / Session Lookup` die **Session ID oder den Claim-Code** eingeben.
+   - Alternativ API: `GET /api/v1/operator/sessions/{id}/details`.
+
+2. **Kontext prüfen**
+   - `deposits`: Zustand, Beträge, Zeitpunkte, ggf. `delivery_error`.
+   - `withdrawals`: Zustand (`funding/queued/broadcasting/settled/failed`), `txid`, Fehlertext.
+   - `support_messages`: Kundenbeschreibung + Zeitachse.
+
+3. **Support-Nachricht gegen technischen Status abgleichen**
+   - "Token nicht erhalten" → prüfen, ob Deposit `ready/fulfilled` ist und ob Pickup bereits konsumiert wurde.
+   - "Auszahlung fehlt" → Withdrawal-Zustand + `txid` und letzte Fehler prüfen.
+
+4. **Entscheiden und dokumentieren**
+   - Wenn klar lösbar: operativen Schritt im Operator-Flow durchführen (z. B. Requeue/Mark Failed/Mark Settled je nach Fall).
+   - Wenn unklar: weitere Kundenrückfrage über Session-Kontext vorbereiten und intern Notiz zum Case erfassen.
+
+5. **Abschluss**
+   - Case erst schließen, wenn technischer Zustand + Kundenrückmeldung konsistent sind.
+   - Für spätere Audits Session-ID und relevante tx/deposit IDs notieren.
 
 ## Webhooks / Integrations
 - **Webhook delivery**: when `delivery_hint` is an `http(s)` URL, the backend POSTs `{ deposit_id, amount_sats, token, txid?, hint }` as soon as the token is minted. Any non-2xx response leaves the deposit in `ready` with the failure recorded so an operator/guest can fall back to manual pickup.
