@@ -61,6 +61,30 @@ cd shuestand/frontend
 npm run dev # run "npm install" once before
 ```
 
+### Descriptor helper (seed → descriptors)
+Use the helper binary in `backend/src/bin/descriptor_gen.rs` to derive descriptors from a seed.
+
+It reads the seed securely (file/stdin prompt — **not** as CLI positional argument) and emits single-quoted env values:
+- `BITCOIN_DESCRIPTOR`
+- `BITCOIN_SPEND_DESCRIPTOR`
+- `BITCOIN_CHANGE_DESCRIPTOR`
+
+Example (raw env lines):
+
+```bash
+cd shuestand/backend
+cargo run --bin descriptor_gen -- --network bitcoin --seed-file /secure/seed.txt --output-env /secure/bitcoin-descriptors.env
+```
+
+Then copy the three `BITCOIN_*DESCRIPTOR` lines into either `backend/.env.example`-based local env files or `infra/docker/backend.env`.
+
+Example (commented `.env` template with security hints):
+
+```bash
+cd shuestand/backend
+cargo run --bin descriptor_gen -- --network bitcoin --seed-file /secure/seed.txt --template --output-env /secure/bitcoin-descriptors.env
+```
+
 ### Publishing behind a reverse proxy
 When the Docker stack lives on an internal host (e.g., `vm-docker:8872`), expose it through a public reverse proxy so visitors reach it via HTTPS without touching the internal network.
 

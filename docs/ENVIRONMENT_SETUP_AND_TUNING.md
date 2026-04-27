@@ -28,11 +28,11 @@ Log level, for example `backend=debug` during diagnostics. Use quieter levels in
 ### `BITCOIN_NETWORK`
 `bitcoin` for mainnet, `testnet`/`signet` for testing.
 
-### Wallet source (choose one model)
-- **Seed model:** `BITCOIN_WALLET_SEED` (+ optional `BITCOIN_WALLET_PASSPHRASE`)
-- **Descriptor model:** `BITCOIN_DESCRIPTOR`, `BITCOIN_SPEND_DESCRIPTOR`, `BITCOIN_CHANGE_DESCRIPTOR`
+### Wallet source (descriptor-only)
+- `BITCOIN_DESCRIPTOR`, `BITCOIN_SPEND_DESCRIPTOR`, `BITCOIN_CHANGE_DESCRIPTOR`
 
-If descriptors are set, they take precedence over seed.
+To derive descriptors from a seed, use:
+`cargo run --bin descriptor_gen -- --network <bitcoin|testnet|signet|regtest> --seed-file /secure/seed.txt --template --output-env /secure/bitcoin-descriptors.env`
 
 Tuning note:
 - Prefer descriptors for production lifecycle control and safer key management workflows.

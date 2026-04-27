@@ -224,7 +224,7 @@ async fn init_onchain_wallet(args: &OnchainWalletArgs) -> Result<(OnchainWallet,
     let spend_descriptor = config
         .bitcoin_spend_descriptor
         .clone()
-        .ok_or_else(|| anyhow!("BITCOIN_SPEND_DESCRIPTOR or BITCOIN_WALLET_SEED must be set"))?;
+        .ok_or_else(|| anyhow!("BITCOIN_SPEND_DESCRIPTOR must be set"))?;
     let blockchain = build_blockchain_client(&config)?;
     let wallet = OnchainWallet::new(
         &db,

@@ -1,12 +1,7 @@
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::time::Duration;
 
-use anyhow::{Context, anyhow};
 use bdk::bitcoin::Network;
-use bdk::bitcoin::bip32::{DerivationPath, ExtendedPrivKey, ExtendedPubKey};
-use bdk::bitcoin::secp256k1::Secp256k1;
-use bdk::keys::bip39::{Language, Mnemonic};
 
 const DEFAULT_ADDRESS_POOL_TARGET: u32 = 20;
 const DEFAULT_DEPOSIT_TARGET_CONFIRMATIONS: u8 = 3;
@@ -78,11 +73,9 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn from_env() -> Self {
-        let mut bitcoin_descriptor = std::env::var("BITCOIN_DESCRIPTOR").ok();
-        let mut bitcoin_spend_descriptor = std::env::var("BITCOIN_SPEND_DESCRIPTOR").ok();
-        let mut bitcoin_change_descriptor = std::env::var("BITCOIN_CHANGE_DESCRIPTOR").ok();
-        let bitcoin_wallet_seed = std::env::var("BITCOIN_WALLET_SEED").ok();
-        let bitcoin_wallet_passphrase = std::env::var("BITCOIN_WALLET_PASSPHRASE").ok();
+        let bitcoin_descriptor = std::env::var("BITCOIN_DESCRIPTOR").ok();
+        let bitcoin_spend_descriptor = std::env::var("BITCOIN_SPEND_DESCRIPTOR").ok();
+        let bitcoin_change_descriptor = std::env::var("BITCOIN_CHANGE_DESCRIPTOR").ok();
         let bitcoin_network = std::env::var("BITCOIN_NETWORK")
             .ok()
             .and_then(|v| match v.trim().to_lowercase().as_str() {
@@ -305,30 +298,6 @@ impl AppConfig {
             })
             .unwrap_or_default();
 
-        if bitcoin_wallet_seed.is_some()
-            && (bitcoin_descriptor.is_none()
-                || bitcoin_spend_descriptor.is_none()
-                || bitcoin_change_descriptor.is_none())
-        {
-            let derived = derive_descriptors_from_seed(
-                bitcoin_wallet_seed.as_ref().unwrap(),
-                bitcoin_wallet_passphrase.as_deref(),
-                bitcoin_network,
-            )
-            .unwrap_or_else(|err| {
-                panic!("failed to derive descriptors from BITCOIN_WALLET_SEED: {err}")
-            });
-            if bitcoin_descriptor.is_none() {
-                bitcoin_descriptor = Some(derived.public_descriptor);
-            }
-            if bitcoin_spend_descriptor.is_none() {
-                bitcoin_spend_descriptor = Some(derived.spend_descriptor);
-            }
-            if bitcoin_change_descriptor.is_none() {
-                bitcoin_change_descriptor = Some(derived.change_descriptor);
-            }
-        }
-
         Self {
             bitcoin_descriptor,
             bitcoin_spend_descriptor,
@@ -387,41 +356,4 @@ pub struct FeeEstimatorSettings {
     pub max_sat_per_vb: f32,
     pub default_fast_sat_per_vb: f32,
     pub default_economy_sat_per_vb: f32,
-}
-
-struct SeedDerivedDescriptors {
-    public_descriptor: String,
-    spend_descriptor: String,
-    change_descriptor: String,
-}
-
-fn derive_descriptors_from_seed(
-    seed_phrase: &str,
-    passphrase: Option<&str>,
-    network: Network,
-) -> Result<SeedDerivedDescriptors, anyhow::Error> {
-    let mnemonic = Mnemonic::parse_in(Language::English, seed_phrase)
-        .context("invalid BITCOIN_WALLET_SEED mnemonic")?;
-    let seed = mnemonic.to_seed(passphrase.unwrap_or(""));
-    let secp = Secp256k1::new();
-    let master = ExtendedPrivKey::new_master(network, &seed)
-        .context("failed to derive master xprv from seed")?;
-    let coin_type = match network {
-        Network::Bitcoin => 0,
-        _ => 1,
-    };
-    let account_path = DerivationPath::from_str(&format!("m/84'/{}'/0'", coin_type))
-        .map_err(|_| anyhow!("invalid derivation path"))?;
-    let account_xprv = master
-        .derive_priv(&secp, &account_path)
-        .context("failed to derive account xprv")?;
-    let account_xpub = ExtendedPubKey::from_priv(&secp, &account_xprv);
-    let fingerprint = master.fingerprint(&secp);
-    let origin = format!("[{}/84h/{}h/0h]", fingerprint, coin_type);
-
-    Ok(SeedDerivedDescriptors {
-        public_descriptor: format!("wpkh({}{}/0/*)", origin, account_xpub),
-        spend_descriptor: format!("wpkh({}{}/0/*)", origin, account_xprv),
-        change_descriptor: format!("wpkh({}{}/1/*)", origin, account_xprv),
-    })
 }

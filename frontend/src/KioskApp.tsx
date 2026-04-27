@@ -120,6 +120,13 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     navigate(`/support?${query.toString()}`)
   }
 
+  const shouldEscalateToSupport = (err: unknown, hasSessionActivity: boolean) => {
+    if (!hasSessionActivity) {
+      return false
+    }
+    return err instanceof ApiClientError && err.status >= 500
+  }
+
   const showFloatingNotice = (text: string) => {
     setFloatingNotice(text)
     if (typeof window === 'undefined') {
@@ -719,7 +726,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
       if (normalized) {
         setMessage(normalized.message)
       }
-      routeToSupport('pickup_error')
+      if (shouldEscalateToSupport(err, supportVisible)) {
+        routeToSupport('pickup_error')
+      }
     },
   })
 
@@ -893,7 +902,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
       } else {
         setMessage(`Request error: ${(err as Error).message}`)
       }
-      routeToSupport('request_error')
+      if (shouldEscalateToSupport(err, supportVisible)) {
+        routeToSupport('request_error')
+      }
     } finally {
       setSubmitting(false)
     }
