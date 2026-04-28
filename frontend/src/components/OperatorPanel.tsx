@@ -788,6 +788,42 @@ export function OperatorPanel() {
               </div>
             )}
           </section>
+
+          <div className="operator-section">
+            <div className="section-heading">
+              <h2>Float overview</h2>
+            </div>
+            <section className="operator-card float-overview-card">
+              {floatStatusQuery.isLoading ? (
+                <p>Loading…</p>
+              ) : !floatBars ? (
+                <p className="status-error">Float status unavailable.</p>
+              ) : (
+                <>
+                  {floatBars.rows.map((row) => (
+                    <div key={row.key} className="float-row">
+                      <div className="float-row-head">
+                        <strong>{row.label}</strong>
+                        <span>{formatSats(row.value)} sats</span>
+                      </div>
+                      <div className="float-bar-track" role="img" aria-label={`${row.label} float bar`}>
+                        <div className="float-bar-fill" style={{ width: `${Math.min(100, row.pct)}%` }} />
+                        <div
+                          className="float-target-marker"
+                          style={{ left: `${Math.min(100, Math.max(0, floatBars.targetPct))}%` }}
+                          title={`Target ${formatSats(floatBars.target)} sats`}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                  <p className="status-meta">Target: {formatSats(floatBars.target)} sats</p>
+                </>
+              )}
+              <p className="status-meta">
+                Rebalancing recommendation: {rebalanceRecommendation}
+              </p>
+            </section>
+          </div>
             </>
           )}
 
@@ -1134,40 +1170,6 @@ export function OperatorPanel() {
 
           {operatorView === 'liquidity' && (
           <div className="operator-section">
-            <div className="section-heading">
-              <h2>Float overview</h2>
-            </div>
-            <section className="operator-card float-overview-card">
-              {floatStatusQuery.isLoading ? (
-                <p>Loading…</p>
-              ) : !floatBars ? (
-                <p className="status-error">Float status unavailable.</p>
-              ) : (
-                <>
-                  {floatBars.rows.map((row) => (
-                    <div key={row.key} className="float-row">
-                      <div className="float-row-head">
-                        <strong>{row.label}</strong>
-                        <span>{formatSats(row.value)} sats</span>
-                      </div>
-                      <div className="float-bar-track" role="img" aria-label={`${row.label} float bar`}>
-                        <div className="float-bar-fill" style={{ width: `${Math.min(100, row.pct)}%` }} />
-                        <div
-                          className="float-target-marker"
-                          style={{ left: `${Math.min(100, Math.max(0, floatBars.targetPct))}%` }}
-                          title={`Target ${formatSats(floatBars.target)} sats`}
-                        />
-                      </div>
-                    </div>
-                  ))}
-                  <p className="status-meta">Target: {formatSats(floatBars.target)} sats</p>
-                </>
-              )}
-              <p className="status-meta">
-                Rebalancing recommendation: {rebalanceRecommendation}
-              </p>
-            </section>
-
             <div className="section-heading">
               <h2>Onchain</h2>
               {renderFloatBadge(floatStatus?.onchain)}
