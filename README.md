@@ -61,10 +61,10 @@ cd shuestand/frontend
 npm run dev # run "npm install" once before
 ```
 
-### Descriptor helper (seed → descriptors)
-Use the helper binary in `backend/src/bin/descriptor_gen.rs` to derive descriptors from a seed.
+### Wallet Descriptor Helper (seed → descriptors)
+The helper binary in `backend/src/bin/descriptor_gen.rs` allows you to derive descriptors from a 12-word seed. These descriptors are required in the shuestand environment file.
 
-It reads the seed securely (file/stdin prompt — **not** as CLI positional argument) and emits single-quoted env values:
+It reads the seed securely (file/stdin prompt — **not** as CLI positional argument) and emits env values:
 - `BITCOIN_DESCRIPTOR`
 - `BITCOIN_SPEND_DESCRIPTOR`
 - `BITCOIN_CHANGE_DESCRIPTOR`

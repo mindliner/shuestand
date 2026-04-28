@@ -101,6 +101,8 @@ type OngoingTransactionEntry =
   | { type: 'wd'; timestamp: number; createdAtLabel: string; withdrawal: Withdrawal }
   | { type: 'dep'; timestamp: number; createdAtLabel: string; deposit: Deposit }
 
+type OperatorView = 'main' | 'liquidity' | 'activity' | 'support'
+
 export function OperatorPanel() {
   const [tokenInput, setTokenInput] = useState(() =>
     typeof window !== 'undefined'
@@ -138,6 +140,7 @@ export function OperatorPanel() {
   const [statsRange, setStatsRange] = useState<'24h' | '7d' | '30d'>('24h')
   const [sessionLookupId, setSessionLookupId] = useState('')
   const [supportSessionFilter, setSupportSessionFilter] = useState('')
+  const [operatorView, setOperatorView] = useState<OperatorView>('main')
 
   const queryClient = useQueryClient()
 
@@ -671,6 +674,44 @@ export function OperatorPanel() {
         <>
           <section className="operator-card">
             <div className="operator-card-header">
+              <h3>Operator views</h3>
+            </div>
+            <div className="button-row segmented">
+              <button
+                type="button"
+                className={operatorView === 'main' ? 'primary' : 'secondary'}
+                onClick={() => setOperatorView('main')}
+              >
+                Main
+              </button>
+              <button
+                type="button"
+                className={operatorView === 'liquidity' ? 'primary' : 'secondary'}
+                onClick={() => setOperatorView('liquidity')}
+              >
+                Liquidity / Float
+              </button>
+              <button
+                type="button"
+                className={operatorView === 'activity' ? 'primary' : 'secondary'}
+                onClick={() => setOperatorView('activity')}
+              >
+                Activity / Transactions
+              </button>
+              <button
+                type="button"
+                className={operatorView === 'support' ? 'primary' : 'secondary'}
+                onClick={() => setOperatorView('support')}
+              >
+                Support Cases
+              </button>
+            </div>
+          </section>
+
+          {operatorView === 'main' && (
+            <>
+          <section className="operator-card">
+            <div className="operator-card-header">
               <h3>Operations mode</h3>
               {!modeQuery.isLoading && !modeQuery.isError && (
                 <span className={`status-pill ${currentMode}`}>
@@ -729,15 +770,15 @@ export function OperatorPanel() {
             ) : (
               <div className="stats-grid">
                 <div>
-                  <span className="status-meta">Anzahl tx ({statsRange})</span>
+                  <span className="status-meta">Tx count ({statsRange})</span>
                   <strong>{statsData.tx_count.toLocaleString('en-US')}</strong>
                 </div>
                 <div>
-                  <span className="status-meta">Volumen C→B ({statsRange})</span>
+                  <span className="status-meta">Volume C→B ({statsRange})</span>
                   <strong>{formatSats(statsData.c_to_b_sats)} sats</strong>
                 </div>
                 <div>
-                  <span className="status-meta">Volumen B→C ({statsRange})</span>
+                  <span className="status-meta">Volume B→C ({statsRange})</span>
                   <strong>{formatSats(statsData.b_to_c_sats)} sats</strong>
                 </div>
                 <div>
@@ -747,7 +788,10 @@ export function OperatorPanel() {
               </div>
             )}
           </section>
+            </>
+          )}
 
+          {operatorView === 'liquidity' && (
           <section className="operator-card">
             <div className="operator-card-header">
               <h3>Ledger & reconciliation</h3>
@@ -825,7 +869,9 @@ export function OperatorPanel() {
               <p>No ledger data yet.</p>
             )}
           </section>
+          )}
 
+          {operatorView === 'activity' && (
           <section className="operator-card">
             <div className="operator-card-header">
               <div className="operator-card-title">
@@ -878,7 +924,9 @@ export function OperatorPanel() {
               </ul>
             )}
           </section>
+          )}
 
+          {operatorView === 'activity' && (
           <section className="operator-card">
             <div className="operator-card-header">
               <h3>Ongoing transactions</h3>
@@ -1082,7 +1130,9 @@ export function OperatorPanel() {
               <p className="status-error">{(depositCleanupMutation.error as Error).message}</p>
             )}
           </section>
+          )}
 
+          {operatorView === 'liquidity' && (
           <div className="operator-section">
             <div className="section-heading">
               <h2>Float overview</h2>
@@ -1312,7 +1362,9 @@ export function OperatorPanel() {
               </section>
             </div>
           </div>
+          )}
 
+          {operatorView === 'liquidity' && (
           <div className="operator-section">
             <div className="section-heading">
               <h2>Cashu</h2>
@@ -1456,12 +1508,13 @@ export function OperatorPanel() {
               </section>
             </div>
           </div>
+          )}
         </>
       )}
 
       {feedback && <p className="operator-feedback">{feedback}</p>}
 
-      {tokenValidated && (
+      {tokenValidated && operatorView === 'support' && (
         <section className="operator-card" style={{ marginTop: '1rem' }}>
           <h3>Support Cases (Open)</h3>
           <label>
@@ -1470,7 +1523,7 @@ export function OperatorPanel() {
               type="text"
               value={supportSessionFilter}
               onChange={(e) => setSupportSessionFilter(e.target.value)}
-              placeholder="session-uuid oder Teilstring"
+              placeholder="session-uuid or partial string"
             />
           </label>
           {supportCasesQuery.isError && (
@@ -1543,7 +1596,7 @@ export function OperatorPanel() {
                 type="text"
                 value={sessionLookupId}
                 onChange={(e) => setSessionLookupId(e.target.value)}
-                placeholder="session-uuid oder 423DC7B0-E05E455E-..."
+                placeholder="session-uuid or 423DC7B0-E05E455E-..."
               />
             </label>
             <button type="submit" disabled={sessionDetailsMutation.isPending || !sessionLookupId.trim()}>

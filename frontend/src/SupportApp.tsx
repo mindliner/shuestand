@@ -43,12 +43,12 @@ export function SupportApp({ theme, onThemeSelect }: SupportAppProps) {
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!session?.token) {
-      setStatus('Keine aktive Session gefunden. Bitte zuerst Session starten oder fortsetzen.')
+      setStatus('No active session found. Please start or resume a session first.')
       return
     }
     const message = text.trim()
     if (!message) {
-      setStatus('Bitte eine Nachricht eingeben.')
+      setStatus('Please enter a message.')
       return
     }
 
@@ -60,7 +60,7 @@ export function SupportApp({ theme, onThemeSelect }: SupportAppProps) {
         context: reason ? { reason } : undefined,
       })
       setText('')
-      setStatus('Nachricht wurde an den Operator gesendet.')
+      setStatus('Message sent to the operator.')
     } catch (err) {
       setStatus(err instanceof Error ? err.message : String(err))
     } finally {
@@ -74,34 +74,34 @@ export function SupportApp({ theme, onThemeSelect }: SupportAppProps) {
         <div>
           <p className="eyebrow">shuestand · support</p>
           <h1>Support Case</h1>
-          <p className="lede">Falls etwas schief lief, hier bitte kurz beschreiben, was passiert ist.</p>
+          <p className="lede">If something went wrong, briefly describe what happened here.</p>
         </div>
         <div className="header-actions">
           <div className="theme-toggle" role="group" aria-label="Color theme">
             <button type="button" className={theme === 'light' ? 'active' : ''} onClick={() => onThemeSelect('light')}>Day</button>
             <button type="button" className={theme === 'dark' ? 'active' : ''} onClick={() => onThemeSelect('dark')}>Night</button>
           </div>
-          <button type="button" className="link-button" onClick={() => navigate('/')}>Zurück zum Kiosk</button>
+          <button type="button" className="link-button" onClick={() => navigate('/')}>Back to kiosk</button>
         </div>
       </header>
 
       <section className="panel">
         <div className="status-block">
-          <h3>Nachricht an Operator</h3>
-          <p className="status-meta code">Session: {session?.id ?? 'nicht verfügbar'}</p>
-          {reason ? <p className="status-meta warning">Grund: {reason}</p> : null}
+          <h3>Message to operator</h3>
+          <p className="status-meta code">Session: {session?.id ?? 'not available'}</p>
+          {reason ? <p className="status-meta warning">Reason: {reason}</p> : null}
           <form onSubmit={submit}>
             <label>
-              Nachricht
+              Message
               <textarea
                 value={text}
                 onChange={(e) => setText(e.target.value)}
                 rows={7}
                 maxLength={2048}
-                placeholder="Bitte Problem und ggf. TX/Adresse/Token-Referenz beschreiben"
+                placeholder="Please describe the issue and include TX/address/token reference if available"
               />
             </label>
-            <button type="submit" disabled={busy}>{busy ? 'Sende…' : 'Nachricht senden'}</button>
+            <button type="submit" disabled={busy}>{busy ? 'Sending…' : 'Send message'}</button>
           </form>
           {status ? <p className="message">{status}</p> : null}
         </div>
