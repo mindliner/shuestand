@@ -1287,25 +1287,51 @@ async fn request_withdrawal(
         .map_err(server_error)?;
     let available_onchain = raw_onchain.saturating_sub(reserved_onchain);
     let ratio = state.single_request_cap_ratio;
-    let withdrawal_cap = ((available_onchain as f64) * ratio).floor() as u64;
-    if withdrawal_cap == 0 {
+
+    let requested_reservation_sats = if req.create_payment_request {
+        req.amount_sats
+            .checked_add(state.withdrawal_fee_buffer_sats)
+            .ok_or_else(|| invalid_request("requested amount is too large"))?
+    } else {
+        req.amount_sats
+    };
+
+    let adjusted_reserved = reserved_onchain.saturating_add(requested_reservation_sats);
+    let available_after = raw_onchain.saturating_sub(adjusted_reserved);
+    let cap_after = ((available_after as f64) * ratio).floor() as u64;
+
+    let max_request_reservation = if ratio <= 0.0 {
+        0
+    } else {
+        (((available_onchain as f64) * ratio) / (1.0 + ratio)).floor() as u64
+    };
+    let fee_buffer_sats = if req.create_payment_request {
+        state.withdrawal_fee_buffer_sats
+    } else {
+        0
+    };
+    let max_request_amount = max_request_reservation.saturating_sub(fee_buffer_sats);
+
+    if cap_after == 0 {
         return Err(unavailable(
             "on-chain wallet is depleted; please contact the operator",
         ));
     }
-    if req.amount_sats > withdrawal_cap {
+    if requested_reservation_sats > cap_after {
         tracing::warn!(
             target: "backend",
             requested = req.amount_sats,
+            requested_reservation_sats,
             raw_onchain,
             reserved_onchain,
             available_onchain,
-            withdrawal_cap,
+            cap_after,
+            max_request_amount,
             "withdrawal request exceeds on-chain float cap"
         );
         return Err(invalid_request(format!(
-            "amount_sats exceeds the current on-chain float cap ({} sats)",
-            withdrawal_cap
+            "amount_sats exceeds the current on-chain float cap (max {} sats right now)",
+            max_request_amount
         )));
     }
 

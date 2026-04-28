@@ -120,12 +120,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     navigate(`/support?${query.toString()}`)
   }
 
-  const shouldEscalateToSupport = (err: unknown, hasSessionActivity: boolean) => {
-    if (!hasSessionActivity) {
-      return false
-    }
-    return err instanceof ApiClientError && err.status >= 500
-  }
+  const shouldEscalateToSupport = (err: unknown) => err instanceof ApiClientError
 
   const showFloatingNotice = (text: string) => {
     setFloatingNotice(text)
@@ -726,7 +721,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
       if (normalized) {
         setMessage(normalized.message)
       }
-      if (shouldEscalateToSupport(err, supportVisible)) {
+      if (shouldEscalateToSupport(err)) {
         routeToSupport('pickup_error')
       }
     },
@@ -902,7 +897,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
       } else {
         setMessage(`Request error: ${(err as Error).message}`)
       }
-      if (shouldEscalateToSupport(err, supportVisible)) {
+      if (shouldEscalateToSupport(err)) {
         routeToSupport('request_error')
       }
     } finally {
@@ -1058,9 +1053,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
         ) : !hasSession ? (
             <div className="session-card hero">
               <p className="eyebrow">Work session</p>
-            <h2>New here? Start a new session first</h2>
+            <h2>Start a work session</h2>
             <p className="helper lead">
-              First-time customers should begin with a new session. If you already have a claim code, use resume below.
+              A session groups one or more swaps together. Start a new session anytime (even multiple times per day). If you already have a claim code, use resume below.
             </p>
             <div className="session-actions-large">
               <button
@@ -1073,7 +1068,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
               <form className="resume-form" onSubmit={handleResumeSession}>
                 <div className="resume-row">
                   <label>
-                    Claim code (returning customers)
+                    Claim code (resume existing session)
                     <input
                       type="text"
                       value={resumeCode}
