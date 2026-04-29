@@ -120,7 +120,21 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     navigate(`/support?${query.toString()}`)
   }
 
-  const shouldEscalateToSupport = (err: unknown) => err instanceof ApiClientError
+  const shouldEscalateToSupport = (err: unknown, context: 'request' | 'pickup') => {
+    if (!(err instanceof ApiClientError)) {
+      return false
+    }
+
+    if (context === 'pickup') {
+      // Pickup can fail transiently (race while status refresh catches up, replay/conflict, etc.).
+      // Keep the user in-flow so they can immediately retry instead of forcing support.
+      if (err.code === 'deposit_not_ready_for_pickup' || err.status < 500) {
+        return false
+      }
+    }
+
+    return err.status >= 500 || err.code === 'non_json_error'
+  }
 
   const showFloatingNotice = (text: string) => {
     setFloatingNotice(text)
@@ -721,7 +735,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
       if (normalized) {
         setMessage(normalized.message)
       }
-      if (shouldEscalateToSupport(err)) {
+      if (shouldEscalateToSupport(err, 'pickup')) {
         routeToSupport('pickup_error')
       }
     },
@@ -897,7 +911,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
       } else {
         setMessage(`Request error: ${(err as Error).message}`)
       }
-      if (shouldEscalateToSupport(err)) {
+      if (shouldEscalateToSupport(err, 'request')) {
         routeToSupport('request_error')
       }
     } finally {
