@@ -70,6 +70,8 @@ const DEFAULT_DEPOSIT_AMOUNT = config.depositMinSats.toString()
 const DEFAULT_WITHDRAWAL_AMOUNT = config.withdrawalMinSats.toString()
 const STATUS_REFRESH_MS = 5000
 const MAX_ARCHIVED_ENTRIES = 20
+const DEFAULT_DEPOSIT_MAX_SATS = 2_000_000
+const DEPOSIT_SLIDER_STEP_SATS = 1_000
 
 const formatSats = (value: number) => value.toLocaleString('en-US')
 
@@ -106,6 +108,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   const [limits, setLimits] = useState(() => ({
     withdrawalMinSats: config.withdrawalMinSats,
     depositMinSats: config.depositMinSats,
+    depositMaxSats: DEFAULT_DEPOSIT_MAX_SATS,
     pendingDepositTtlSecs: 600,
     depositFlowEnabled: true,
     depositFlowReason: null as string | null,
@@ -250,6 +253,10 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
 
   const queryClient = useQueryClient()
   const sessionToken = session?.token ?? null
+  const displayedDepositMaxSats = Math.max(
+    limits.depositMinSats,
+    Math.floor(limits.depositMaxSats / DEPOSIT_SLIDER_STEP_SATS) * DEPOSIT_SLIDER_STEP_SATS
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -267,6 +274,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
         const pendingTtl = Number(runtime.pending_deposit_ttl_secs)
         const resolvedPendingTtl =
           Number.isFinite(pendingTtl) && pendingTtl > 0 ? pendingTtl : undefined
+        const depositMax = Number(runtime.deposit_max_sats)
+        const resolvedDepositMax =
+          Number.isFinite(depositMax) && depositMax > 0 ? depositMax : undefined
         const depositFlowEnabled = runtime.deposit_flow_enabled !== false
         const depositFlowReason = runtime.deposit_flow_reason ?? null
         const operationMode = runtime.operation_mode ?? 'normal'
@@ -276,6 +286,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           const next = {
             withdrawalMinSats: resolvedMin ?? current.withdrawalMinSats,
             depositMinSats: resolvedDepositMin ?? current.depositMinSats,
+            depositMaxSats: resolvedDepositMax ?? current.depositMaxSats,
             pendingDepositTtlSecs: resolvedPendingTtl ?? current.pendingDepositTtlSecs,
             depositFlowEnabled,
             depositFlowReason,
@@ -286,6 +297,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
             next.withdrawalMinSats === current.withdrawalMinSats &&
             next.depositMinSats === current.depositMinSats &&
             next.pendingDepositTtlSecs === current.pendingDepositTtlSecs &&
+            next.depositMaxSats === current.depositMaxSats &&
             next.depositFlowEnabled === current.depositFlowEnabled &&
             next.depositFlowReason === current.depositFlowReason &&
             next.operationMode === current.operationMode &&
@@ -322,12 +334,18 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   useEffect(() => {
     setDepositAmount((current) => {
       const numeric = Number(current)
-      if (!Number.isFinite(numeric) || numeric >= limits.depositMinSats) {
-        return current
+      if (!Number.isFinite(numeric)) {
+        return limits.depositMinSats.toString()
       }
-      return limits.depositMinSats.toString()
+      if (numeric < limits.depositMinSats) {
+        return limits.depositMinSats.toString()
+      }
+      if (numeric > limits.depositMaxSats) {
+        return limits.depositMaxSats.toString()
+      }
+      return current
     })
-  }, [limits.depositMinSats])
+  }, [limits.depositMinSats, limits.depositMaxSats])
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -835,9 +853,13 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           throw new Error(depositDisabledMessage)
         }
         const requestedAmount = Number(depositAmount)
-        if (!Number.isFinite(requestedAmount) || requestedAmount < limits.depositMinSats) {
+        if (
+          !Number.isFinite(requestedAmount) ||
+          requestedAmount < limits.depositMinSats ||
+          requestedAmount > limits.depositMaxSats
+        ) {
           throw new Error(
-            `Deposit amount must be at least ${limits.depositMinSats.toLocaleString()} sats`
+            `Deposit amount must be between ${limits.depositMinSats.toLocaleString()} and ${limits.depositMaxSats.toLocaleString()} sats`
           )
         }
         const payload = {
@@ -1120,16 +1142,20 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                       </p>
                     )}
                     <label>
-                      Amount (sats)
+                      Amount (sats): {Number(depositAmount || limits.depositMinSats).toLocaleString()}
                       <input
-                        type="number"
-                      min={limits.depositMinSats}
-                      value={depositAmount}
-                      onChange={(e) => setDepositAmount(e.target.value)}
-                      required
-                    />
-                    <span className="helper">Minimum {limits.depositMinSats.toLocaleString()} sats</span>
-                  </label>
+                        type="range"
+                        min={limits.depositMinSats}
+                        max={displayedDepositMaxSats}
+                        step={DEPOSIT_SLIDER_STEP_SATS}
+                        value={Number(depositAmount || limits.depositMinSats)}
+                        onChange={(e) => setDepositAmount(e.target.value)}
+                        required
+                      />
+                      <span className="helper">
+                        Range {limits.depositMinSats.toLocaleString()}–{displayedDepositMaxSats.toLocaleString()} sats
+                      </span>
+                    </label>
                   </>
                 )
               ) : (

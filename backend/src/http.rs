@@ -180,6 +180,7 @@ struct PublicConfigResponse {
     withdrawal_min_sats: u64,
     withdrawal_fee_buffer_sats: u64,
     deposit_min_sats: u64,
+    deposit_max_sats: u64,
     deposit_target_confirmations: u8,
     float_target_sats: u64,
     float_min_ratio: f32,
@@ -197,7 +198,27 @@ struct PublicConfigResponse {
 }
 
 async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicConfigResponse> {
+    const MAX_DEPOSIT_SATS: u64 = super::MAX_DEPOSIT_SATS;
+
     let operation_mode = state.current_operation_mode().await;
+
+    let current_deposit_cap = if let Some(cashu_wallet) = state.cashu_wallet.as_ref() {
+        let spendable = {
+            let guard = cashu_wallet.lock().await;
+            guard.total_balance().await.map_err(server_error)?.to_u64()
+        };
+        let reserved_cashu = state
+            .db
+            .reserved_cashu_deposit_sats()
+            .await
+            .map_err(server_error)?;
+        let effective_spendable = spendable.saturating_sub(reserved_cashu);
+        ((effective_spendable as f64) * state.single_request_cap_ratio).floor() as u64
+    } else {
+        0
+    };
+    let deposit_max_sats = current_deposit_cap.min(MAX_DEPOSIT_SATS);
+
     let (deposit_flow_enabled, deposit_flow_reason) = if state.cashu_wallet.is_none() {
         (false, Some(CASHU_WALLET_UNAVAILABLE_MESSAGE.to_string()))
     } else if matches!(operation_mode, OperationMode::Drain) {
@@ -210,20 +231,12 @@ async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicCon
             false,
             Some("Shuestand is in maintenance mode (halt); processing is paused".to_string()),
         )
+    } else if deposit_max_sats == 0 {
+        (false, Some(CASHU_FLOAT_DEPLETED_MESSAGE.to_string()))
+    } else if deposit_max_sats < state.withdrawal_min_sats {
+        (false, Some(DEPOSIT_FLOAT_TOO_LOW_MESSAGE.to_string()))
     } else {
-        let snapshot = state.float_status.read().await.clone();
-        let cashu_balance = snapshot.cashu.balance_sats;
-        if cashu_balance == 0 {
-            (false, Some(CASHU_FLOAT_DEPLETED_MESSAGE.to_string()))
-        } else {
-            let deposit_cap =
-                ((cashu_balance as f64) * state.single_request_cap_ratio).floor() as u64;
-            if deposit_cap < state.withdrawal_min_sats {
-                (false, Some(DEPOSIT_FLOAT_TOO_LOW_MESSAGE.to_string()))
-            } else {
-                (true, None)
-            }
-        }
+        (true, None)
     };
 
     let fee_snapshot = state.fee_estimator.snapshot().await;
@@ -232,6 +245,7 @@ async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicCon
         withdrawal_min_sats: state.withdrawal_min_sats,
         withdrawal_fee_buffer_sats: state.withdrawal_fee_buffer_sats,
         deposit_min_sats: state.deposit_min_sats,
+        deposit_max_sats,
         deposit_target_confirmations: state.deposit_target_confirmations,
         float_target_sats: state.float_target_sats,
         float_min_ratio: state.float_min_ratio,
