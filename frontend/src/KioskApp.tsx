@@ -77,6 +77,13 @@ const formatSats = (value: number) => value.toLocaleString('en-US')
 
 const normalizeError = (err: unknown): Error | null => {
   if (!err) return null
+  if (
+    err instanceof ApiClientError &&
+    err.status === 429 &&
+    (err.code === 'non_json_error' || /too many requests/i.test(err.message))
+  ) {
+    return new Error('Too many requests for a moment. Please tap Reveal token again in 1–2 seconds.')
+  }
   return err instanceof Error ? err : new Error(String(err))
 }
 

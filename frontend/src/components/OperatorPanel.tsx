@@ -24,6 +24,7 @@ import {
   getPublicConfig,
   getOperatorSessionDetails,
   listOperatorSupportCases,
+  pickupDeposit,
   updateOperatorSupportCaseStatus,
 } from '../lib/api'
 import { CopyButton } from './KioskStatusCards'
@@ -141,6 +142,7 @@ export function OperatorPanel() {
   const [sessionLookupId, setSessionLookupId] = useState('')
   const [supportSessionFilter, setSupportSessionFilter] = useState('')
   const [operatorView, setOperatorView] = useState<OperatorView>('main')
+  const [recoveredPickupTokens, setRecoveredPickupTokens] = useState<Record<string, string>>({})
 
   const queryClient = useQueryClient()
 
@@ -288,6 +290,19 @@ export function OperatorPanel() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['support-cases', token] })
       setFeedback('Support case closed')
+    },
+  })
+
+  const revealDepositTokenMutation = useMutation({
+    mutationFn: ({ id, pickupToken }: { id: string; pickupToken: string }) =>
+      pickupDeposit(id, pickupToken),
+    onSuccess: (res, variables) => {
+      setRecoveredPickupTokens((prev) => ({ ...prev, [variables.id]: res.token }))
+      setFeedback(`Recovered token for ${variables.id}`)
+      sessionDetailsMutation.mutate()
+    },
+    onError: (err: unknown) => {
+      setFeedback(err instanceof Error ? err.message : 'Token recovery failed')
     },
   })
 
@@ -1614,6 +1629,46 @@ export function OperatorPanel() {
               <p className="status-meta">
                 Deposits: {sessionDetailsMutation.data.deposits.length} · Withdrawals: {sessionDetailsMutation.data.withdrawals.length} · Messages: {sessionDetailsMutation.data.support_messages.length}
               </p>
+              {sessionDetailsMutation.data.deposits.length > 0 && (
+                <div style={{ marginTop: '0.75rem' }}>
+                  <p className="status-meta"><strong>Deposits</strong></p>
+                  <ul className="archived-list">
+                    {sessionDetailsMutation.data.deposits.slice(0, 20).map((dep) => {
+                      const recovered = recoveredPickupTokens[dep.id]
+                      return (
+                        <li key={dep.id}>
+                          <span className="status-meta code">{dep.id}</span>
+                          <span className="status-meta">
+                            {dep.state} · {formatSats(dep.amount_sats)} sats
+                          </span>
+                          {dep.state === 'ready' && dep.pickup_token ? (
+                            <button
+                              type="button"
+                              className="secondary"
+                              style={{ marginTop: '0.35rem' }}
+                              disabled={revealDepositTokenMutation.isPending}
+                              onClick={() =>
+                                revealDepositTokenMutation.mutate({
+                                  id: dep.id,
+                                  pickupToken: dep.pickup_token as string,
+                                })
+                              }
+                            >
+                              {revealDepositTokenMutation.isPending ? 'Recovering…' : 'Recover token'}
+                            </button>
+                          ) : null}
+                          {recovered && (
+                            <div className="token-card" style={{ marginTop: '0.4rem' }}>
+                              <p className="status-meta code">{formatTokenSnippet(recovered)}</p>
+                              <CopyButton label="Copy recovered token" text={recovered} />
+                            </div>
+                          )}
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </div>
+              )}
               {sessionDetailsMutation.data.support_messages.length > 0 && (
                 <ul className="archived-list">
                   {sessionDetailsMutation.data.support_messages.slice(0, 10).map((msg) => (
