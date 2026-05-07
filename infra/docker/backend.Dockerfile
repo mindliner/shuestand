@@ -23,5 +23,5 @@ RUN mkdir -p /data/cashu \
     && chown -R shuestand:shuestand /data
 ENV RUST_LOG=info
 USER shuestand
-EXPOSE 8872
+EXPOSE 8080
 CMD ["shuestand-backend"]

@@ -21,6 +21,7 @@ services:
       - backend.env
     environment:
       DATABASE_URL: postgres://shuestand:Wenaco.41hema@postgres:5432/shuestand
+      SHUESTAND_BACKEND_PORT: "8080"
     volumes:
       - cashu-data:/data/cashu
     depends_on:

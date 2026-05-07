@@ -42,7 +42,7 @@ cp backend.env.example backend.env
 docker compose -p shuestand up -d --build
 ```
 
-Now visit `http://localhost:8872` for the kiosk/operator UI (see the `8872:80` mapping in `infra/docker/docker-compose.yml`); `/api` requests are reverse-proxied to the backend container.
+Now visit `http://localhost:8872` for the kiosk/operator UI (see the `8872:80` mapping in `infra/docker/docker-compose.yml`); `/api` requests are reverse-proxied to the backend container (`backend:8080` on the internal Docker network).
 
 Once running, update `infra/docker/backend.env` whenever you rotate keys/policies and restart the backend service (`docker compose restart backend`).
 
