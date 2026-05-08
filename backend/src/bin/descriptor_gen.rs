@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow};
-use bdk::bitcoin::Network;
+use anyhow::{anyhow, Context, Result};
 use bdk::bitcoin::bip32::{DerivationPath, ExtendedPrivKey, ExtendedPubKey};
 use bdk::bitcoin::secp256k1::Secp256k1;
+use bdk::bitcoin::Network;
 use bdk::keys::bip39::{Language, Mnemonic};
 use clap::Parser;
 
@@ -94,7 +94,7 @@ fn read_seed_phrase(seed_file: Option<&PathBuf>) -> Result<String> {
         if trimmed.is_empty() {
             return Err(anyhow!("seed file is empty"));
         }
-        return Ok(trimmed.to_string());
+        return Ok(normalize_seed_phrase(trimmed));
     }
 
     eprint!("Enter BIP39 seed words: ");
@@ -107,7 +107,11 @@ fn read_seed_phrase(seed_file: Option<&PathBuf>) -> Result<String> {
     if trimmed.is_empty() {
         return Err(anyhow!("seed phrase is empty"));
     }
-    Ok(trimmed.to_string())
+    Ok(normalize_seed_phrase(trimmed))
+}
+
+fn normalize_seed_phrase(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn read_passphrase(passphrase_file: Option<&PathBuf>) -> Result<Option<String>> {
@@ -145,8 +149,10 @@ fn derive_descriptors_from_seed(
     passphrase: Option<&str>,
     network: Network,
 ) -> Result<SeedDerivedDescriptors, anyhow::Error> {
-    let mnemonic = Mnemonic::parse_in(Language::English, seed_phrase)
-        .context("invalid BIP39 mnemonic")?;
+    maybe_return_checksum_candidates(seed_phrase, Language::English)?;
+
+    let mnemonic =
+        Mnemonic::parse_in(Language::English, seed_phrase).context("invalid BIP39 mnemonic")?;
     let seed = mnemonic.to_seed(passphrase.unwrap_or(""));
     let secp = Secp256k1::new();
     let master = ExtendedPrivKey::new_master(network, &seed)
@@ -169,4 +175,91 @@ fn derive_descriptors_from_seed(
         spend_descriptor: format!("wpkh({}{}/0/*)", origin, account_xprv),
         change_descriptor: format!("wpkh({}{}/1/*)", origin, account_xprv),
     })
+}
+
+fn maybe_return_checksum_candidates(seed_phrase: &str, language: Language) -> Result<()> {
+    let words = seed_phrase
+        .split_whitespace()
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>();
+
+    let word_count = words.len();
+    if word_count != 11 && word_count != 23 {
+        return Ok(());
+    }
+
+    for (index, word) in words.iter().enumerate() {
+        if language.find_word(word).is_none() {
+            return Err(anyhow!(
+                "invalid BIP39 word at position {}: '{}'",
+                index + 1,
+                word
+            ));
+        }
+    }
+
+    let prefix = words.join(" ");
+    let mut candidates = Vec::new();
+    for candidate in language.word_list() {
+        let phrase = format!("{prefix} {candidate}");
+        if Mnemonic::parse_in(language, &phrase).is_ok() {
+            candidates.push(*candidate);
+        }
+    }
+
+    if candidates.is_empty() {
+        return Err(anyhow!(
+            "incomplete BIP39 mnemonic ({} words), but no checksum-valid final words were found",
+            word_count
+        ));
+    }
+
+    Err(anyhow!(
+        "incomplete BIP39 mnemonic: got {} words.\nPossible checksum-valid final words ({}):\n{}\n\nPick one final word, append it to your phrase, and run this command again.",
+        word_count,
+        candidates.len(),
+        format_word_candidates(&candidates)
+    ))
+}
+
+fn format_word_candidates(words: &[&str]) -> String {
+    const PER_LINE: usize = 8;
+    words
+        .chunks(PER_LINE)
+        .map(|chunk| chunk.join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eleven_word_phrase_lists_128_candidates() {
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon";
+        let err = maybe_return_checksum_candidates(phrase, Language::English)
+            .expect_err("11 words should return candidates");
+        let msg = err.to_string();
+        assert!(msg.contains("got 11 words"));
+        assert!(msg.contains("(128)"));
+        assert!(msg.contains("about"));
+    }
+
+    #[test]
+    fn twenty_three_word_phrase_lists_8_candidates() {
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon";
+        let err = maybe_return_checksum_candidates(phrase, Language::English)
+            .expect_err("23 words should return candidates");
+        let msg = err.to_string();
+        assert!(msg.contains("got 23 words"));
+        assert!(msg.contains("(8)"));
+    }
+
+    #[test]
+    fn complete_phrase_passes_candidate_gate() {
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        maybe_return_checksum_candidates(phrase, Language::English)
+            .expect("12 words should skip candidate mode");
+    }
 }

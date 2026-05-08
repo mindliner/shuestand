@@ -62,9 +62,10 @@ npm run dev # run "npm install" once before
 ```
 
 ### Wallet Descriptor Helper (seed → descriptors)
-The helper binary in `backend/src/bin/descriptor_gen.rs` allows you to derive descriptors from a 12-word seed. These descriptors are required in the shuestand environment file.
+The helper binary in `backend/src/bin/descriptor_gen.rs` allows you to derive descriptors from a 12- or 24-word seed. These descriptors are required in the shuestand environment file.
 
 It reads the seed securely (file/stdin prompt — **not** as CLI positional argument) and emits env values:
+- If you provide only 11 or 23 words, it returns checksum-valid final-word candidates so you can complete the mnemonic and rerun.
 - `BITCOIN_DESCRIPTOR`
 - `BITCOIN_SPEND_DESCRIPTOR`
 - `BITCOIN_CHANGE_DESCRIPTOR`
