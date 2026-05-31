@@ -72,6 +72,7 @@ const STATUS_REFRESH_MS = 5000
 const MAX_ARCHIVED_ENTRIES = 20
 const DEFAULT_DEPOSIT_MAX_SATS = 2_000_000
 const DEPOSIT_SLIDER_STEP_SATS = 1_000
+const WITHDRAWAL_SLIDER_STEP_SATS = 1_000
 
 const formatSats = (value: number) => value.toLocaleString('en-US')
 
@@ -114,6 +115,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   const floatingNoticeTimer = useRef<number | null>(null)
   const [limits, setLimits] = useState(() => ({
     withdrawalMinSats: config.withdrawalMinSats,
+    withdrawalMaxSats: config.withdrawalMinSats,
     depositMinSats: config.depositMinSats,
     depositMaxSats: DEFAULT_DEPOSIT_MAX_SATS,
     pendingDepositTtlSecs: 600,
@@ -264,6 +266,10 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
     limits.depositMinSats,
     Math.floor(limits.depositMaxSats / DEPOSIT_SLIDER_STEP_SATS) * DEPOSIT_SLIDER_STEP_SATS
   )
+  const displayedWithdrawalMaxSats = Math.max(
+    limits.withdrawalMinSats,
+    Math.floor(limits.withdrawalMaxSats / WITHDRAWAL_SLIDER_STEP_SATS) * WITHDRAWAL_SLIDER_STEP_SATS
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -275,6 +281,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
         }
         const min = Number(runtime.withdrawal_min_sats)
         const resolvedMin = Number.isFinite(min) && min > 0 ? min : undefined
+        const withdrawalMax = Number(runtime.withdrawal_max_sats)
+        const resolvedWithdrawalMax =
+          Number.isFinite(withdrawalMax) && withdrawalMax > 0 ? withdrawalMax : undefined
         const depositMin = Number(runtime.deposit_min_sats)
         const resolvedDepositMin =
           Number.isFinite(depositMin) && depositMin > 0 ? depositMin : undefined
@@ -292,6 +301,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
         setLimits((current) => {
           const next = {
             withdrawalMinSats: resolvedMin ?? current.withdrawalMinSats,
+            withdrawalMaxSats: resolvedWithdrawalMax ?? current.withdrawalMaxSats,
             depositMinSats: resolvedDepositMin ?? current.depositMinSats,
             depositMaxSats: resolvedDepositMax ?? current.depositMaxSats,
             pendingDepositTtlSecs: resolvedPendingTtl ?? current.pendingDepositTtlSecs,
@@ -302,6 +312,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           }
           if (
             next.withdrawalMinSats === current.withdrawalMinSats &&
+            next.withdrawalMaxSats === current.withdrawalMaxSats &&
             next.depositMinSats === current.depositMinSats &&
             next.pendingDepositTtlSecs === current.pendingDepositTtlSecs &&
             next.depositMaxSats === current.depositMaxSats &&
@@ -331,12 +342,18 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   useEffect(() => {
     setWithdrawalAmount((current) => {
       const numeric = Number(current)
-      if (!Number.isFinite(numeric) || numeric >= limits.withdrawalMinSats) {
-        return current
+      if (!Number.isFinite(numeric)) {
+        return limits.withdrawalMinSats.toString()
       }
-      return limits.withdrawalMinSats.toString()
+      if (numeric < limits.withdrawalMinSats) {
+        return limits.withdrawalMinSats.toString()
+      }
+      if (numeric > limits.withdrawalMaxSats) {
+        return limits.withdrawalMaxSats.toString()
+      }
+      return current
     })
-  }, [limits.withdrawalMinSats])
+  }, [limits.withdrawalMinSats, limits.withdrawalMaxSats])
 
   useEffect(() => {
     setDepositAmount((current) => {
@@ -921,6 +938,11 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
             `Withdrawal amount must be at least ${withdrawalMinimum.toLocaleString()} sats`
           )
         }
+        if (resolvedAmount > limits.withdrawalMaxSats) {
+          throw new Error(
+            `Withdrawal amount must be between ${withdrawalMinimum.toLocaleString()} and ${limits.withdrawalMaxSats.toLocaleString()} sats`
+          )
+        }
           payload.amount_sats = resolvedAmount
           payload.create_payment_request = true
         }
@@ -949,6 +971,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   }
 
   const withdrawalMinimum = limits.withdrawalMinSats
+  const withdrawalMaximum = limits.withdrawalMaxSats
   const decodedTokenAmount =
     tokenMintInfo && !('error' in tokenMintInfo) ? tokenMintInfo.amount : null
   const tokenBelowMinimum = Boolean(
@@ -1194,16 +1217,18 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                   </div>
                   {withdrawalMethod === 'payment_request' && (
                     <label>
-                      Amount (sats)
+                      Amount (sats): {Number(withdrawalAmount || withdrawalMinimum).toLocaleString()}
                       <input
-                        type="number"
+                        type="range"
                         min={withdrawalMinimum}
+                        max={displayedWithdrawalMaxSats}
+                        step={WITHDRAWAL_SLIDER_STEP_SATS}
                         value={withdrawalAmount}
                         onChange={(e) => setWithdrawalAmount(e.target.value)}
                         required={withdrawalMethod === 'payment_request'}
                       />
                       <span className="helper">
-                        Minimum {withdrawalMinimum.toLocaleString()} sats
+                        Range {withdrawalMinimum.toLocaleString()}–{displayedWithdrawalMaxSats.toLocaleString()} sats
                       </span>
                     </label>
                   )}
@@ -1238,6 +1263,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                     <div className="helper">
                       We'll create a NUT-18 Cashu payment request so you can scan a QR code
                       instead of pasting a token.
+                      {withdrawalMaximum < withdrawalMinimum && (
+                        <> Payment requests are temporarily unavailable right now.</>
+                      )}
                     </div>
                   )}
                   <label>

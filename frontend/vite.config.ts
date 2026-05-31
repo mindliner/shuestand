@@ -38,11 +38,11 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
-    allowedHosts: ['logom-holo'],
+    allowedHosts: ['logom-holo', 'logom-holo.home.arpa'],
   },
   preview: {
     host: '0.0.0.0',
     port: 4173,
-    allowedHosts: ['logom-holo'],
+    allowedHosts: ['logom-holo', 'logom-holo.home.arpa'],
   },
 })

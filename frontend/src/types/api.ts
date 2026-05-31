@@ -245,6 +245,7 @@ export interface FloatStatusResponse {
 
 export interface PublicConfigResponse {
   withdrawal_min_sats: number
+  withdrawal_max_sats?: number
   withdrawal_fee_buffer_sats?: number
   deposit_min_sats: number
   deposit_max_sats?: number

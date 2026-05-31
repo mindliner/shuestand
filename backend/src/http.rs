@@ -178,6 +178,7 @@ struct ApiError {
 #[derive(Serialize)]
 struct PublicConfigResponse {
     withdrawal_min_sats: u64,
+    withdrawal_max_sats: u64,
     withdrawal_fee_buffer_sats: u64,
     deposit_min_sats: u64,
     deposit_max_sats: u64,
@@ -219,6 +220,28 @@ async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicCon
     };
     let deposit_max_sats = current_deposit_cap.min(MAX_DEPOSIT_SATS);
 
+    let withdrawal_max_sats = if let Some(onchain_wallet) = state.onchain_wallet.as_ref() {
+        let summary = onchain_wallet.balance().await.map_err(server_error)?;
+        let raw_onchain = summary.confirmed.saturating_add(summary.trusted_pending);
+        let reserved_onchain = state
+            .db
+            .reserved_onchain_withdrawal_sats()
+            .await
+            .map_err(server_error)?;
+        let available_onchain = raw_onchain.saturating_sub(reserved_onchain);
+        if state.single_request_cap_ratio <= 0.0 {
+            0
+        } else {
+            let max_request_reservation =
+                (((available_onchain as f64) * state.single_request_cap_ratio)
+                    / (1.0 + state.single_request_cap_ratio))
+                    .floor() as u64;
+            max_request_reservation.saturating_sub(state.withdrawal_fee_buffer_sats)
+        }
+    } else {
+        0
+    };
+
     let (deposit_flow_enabled, deposit_flow_reason) = if state.cashu_wallet.is_none() {
         (false, Some(CASHU_WALLET_UNAVAILABLE_MESSAGE.to_string()))
     } else if matches!(operation_mode, OperationMode::Drain) {
@@ -243,6 +266,7 @@ async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicCon
 
     let payload = PublicConfigResponse {
         withdrawal_min_sats: state.withdrawal_min_sats,
+        withdrawal_max_sats,
         withdrawal_fee_buffer_sats: state.withdrawal_fee_buffer_sats,
         deposit_min_sats: state.deposit_min_sats,
         deposit_max_sats,
