@@ -232,11 +232,7 @@ async fn get_public_config(State(state): State<AppState>) -> ApiResult<PublicCon
         if state.single_request_cap_ratio <= 0.0 {
             0
         } else {
-            let max_request_reservation =
-                (((available_onchain as f64) * state.single_request_cap_ratio)
-                    / (1.0 + state.single_request_cap_ratio))
-                    .floor() as u64;
-            max_request_reservation.saturating_sub(state.withdrawal_fee_buffer_sats)
+            ((available_onchain as f64) * state.single_request_cap_ratio).floor() as u64
         }
     } else {
         0
@@ -1326,44 +1322,24 @@ async fn request_withdrawal(
     let available_onchain = raw_onchain.saturating_sub(reserved_onchain);
     let ratio = state.single_request_cap_ratio;
 
-    let requested_reservation_sats = if req.create_payment_request {
-        req.amount_sats
-            .checked_add(state.withdrawal_fee_buffer_sats)
-            .ok_or_else(|| invalid_request("requested amount is too large"))?
-    } else {
-        req.amount_sats
-    };
-
-    let adjusted_reserved = reserved_onchain.saturating_add(requested_reservation_sats);
-    let available_after = raw_onchain.saturating_sub(adjusted_reserved);
-    let cap_after = ((available_after as f64) * ratio).floor() as u64;
-
-    let max_request_reservation = if ratio <= 0.0 {
+    let max_request_amount = if ratio <= 0.0 {
         0
     } else {
-        (((available_onchain as f64) * ratio) / (1.0 + ratio)).floor() as u64
+        ((available_onchain as f64) * ratio).floor() as u64
     };
-    let fee_buffer_sats = if req.create_payment_request {
-        state.withdrawal_fee_buffer_sats
-    } else {
-        0
-    };
-    let max_request_amount = max_request_reservation.saturating_sub(fee_buffer_sats);
 
-    if cap_after == 0 {
+    if max_request_amount == 0 {
         return Err(unavailable(
             "on-chain wallet is depleted; please contact the operator",
         ));
     }
-    if requested_reservation_sats > cap_after {
+    if req.amount_sats > max_request_amount {
         tracing::warn!(
             target: "backend",
             requested = req.amount_sats,
-            requested_reservation_sats,
             raw_onchain,
             reserved_onchain,
             available_onchain,
-            cap_after,
             max_request_amount,
             "withdrawal request exceeds on-chain float cap"
         );
