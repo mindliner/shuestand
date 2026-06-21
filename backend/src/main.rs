@@ -1459,10 +1459,15 @@ impl ChainSource for ElectrumChainSource {
         let history_script = script.clone();
         let client = self.client.clone();
         let history = spawn_blocking(move || {
-            client
-                .lock()
-                .expect("electrum client poisoned")
-                .script_get_history(&history_script)
+            let guard = client.lock().expect("electrum client poisoned");
+            guard.script_subscribe(&history_script)?;
+            let history = guard.script_get_history(&history_script);
+            let unsubscribe_result = guard.script_unsubscribe(&history_script);
+            match (history, unsubscribe_result) {
+                (Ok(history), Ok(_)) => Ok(history),
+                (Err(err), _) => Err(err),
+                (Ok(_), Err(err)) => Err(err),
+            }
         })
         .await??;
 
