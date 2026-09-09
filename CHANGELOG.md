@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-09
+- Added a Lightning→Bitcoin payout path to kiosk withdrawals: users can now request a BOLT11 funding invoice, then Shuestand automatically mints the paid quote into float and reuses the existing on-chain payout worker.
+- Extended the withdrawal state payload/UI with embedded Lightning invoice metadata so the kiosk can show QR/copy actions and a paid timestamp while the withdrawal sits in `funding`.
+
 ## 2026-04-05
 - Added transaction webhook (`TRANSACTION_WEBHOOK_URL`)
 - Added information about the canonical mint to the kios so users understand where the cashu token come from

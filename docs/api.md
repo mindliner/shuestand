@@ -49,7 +49,7 @@ Additional fields:
 - `failed` – unrecoverable error (details appended to `notes`).
 
 ### Withdrawal
-Represents Cashu → Bitcoin redemption via on-chain payout.
+Represents a funded on-chain payout. Funding can arrive either as a Cashu token, a Cashu payment request, or a Lightning invoice that credits the canonical wallet before payout.
 
 ```json
 {
@@ -64,6 +64,7 @@ Represents Cashu → Bitcoin redemption via on-chain payout.
 ```
 
 `state` enum:
+- `funding` – waiting for a Cashu payment-request callback or a Lightning invoice payment.
 - `queued` – token validated, waiting for operator policy checks.
 - `broadcasting` – transaction building/broadcasting.
 - `confirming` – tx sent, waiting for 1+ confirmation.
@@ -157,15 +158,37 @@ Request body:
 }
 ```
 
+Alternative funding modes:
+
+```json
+{
+  "amount_sats": 75000,
+  "delivery_address": "bc1q...",
+  "create_payment_request": true
+}
+```
+
+```json
+{
+  "amount_sats": 75000,
+  "delivery_address": "bc1q...",
+  "create_lightning_invoice": true
+}
+```
+
 Response `202 Accepted`:
 ```json
 {
   "data": {
     "id": "wd_01hx...",
-    "state": "queued"
+    "state": "funding"
   }
 }
 ```
+
+Notes:
+- Exactly one funding input is allowed per request: `token`, `create_payment_request`, or `create_lightning_invoice`.
+- Lightning-funded withdrawals return a `lightning_invoice` object from `GET /api/v1/withdrawals/{id}` with the BOLT11 string plus expiry/paid timestamps.
 
 ### GET `/api/v1/withdrawals/{id}`
 Returns the withdrawal object including `txid`, `fee_paid_sats`, and `state` progression.

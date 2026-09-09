@@ -282,8 +282,8 @@ impl Database {
     pub async fn insert_withdrawal(&self, withdrawal: &Withdrawal) -> Result<(), Error> {
         sqlx::query(
             r#"INSERT INTO withdrawals
-            (id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at, session_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)"#,
+            (id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at, lightning_quote_id, lightning_invoice_request, lightning_invoice_expires_at, lightning_invoice_paid_at, session_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)"#,
         )
         .bind(&withdrawal.id)
         .bind(withdrawal.state.as_str())
@@ -310,6 +310,18 @@ impl Database {
                 .payment_request_fulfilled_at
                 .map(|ts| ts.to_rfc3339()),
         )
+        .bind(&withdrawal.lightning_quote_id)
+        .bind(&withdrawal.lightning_invoice_request)
+        .bind(
+            withdrawal
+                .lightning_invoice_expires_at
+                .map(|ts| ts.to_rfc3339()),
+        )
+        .bind(
+            withdrawal
+                .lightning_invoice_paid_at
+                .map(|ts| ts.to_rfc3339()),
+        )
         .bind(withdrawal.session_id.as_deref())
         .execute(&self.pool)
         .await?;
@@ -318,7 +330,7 @@ impl Database {
 
     pub async fn fetch_withdrawal(&self, id: &str) -> Result<Withdrawal, Error> {
         let row = sqlx::query(
-            r#"SELECT id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at, session_id
+            r#"SELECT id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at, lightning_quote_id, lightning_invoice_request, lightning_invoice_expires_at, lightning_invoice_paid_at, session_id
             FROM withdrawals WHERE id = $1"#,
         )
         .bind(id)
@@ -363,6 +375,16 @@ impl Database {
                 &row,
                 "payment_request_fulfilled_at",
             )?,
+            lightning_quote_id: decode_optional_string(&row, "lightning_quote_id")?,
+            lightning_invoice_request: decode_optional_string(&row, "lightning_invoice_request")?,
+            lightning_invoice_expires_at: decode_optional_timestamp(
+                &row,
+                "lightning_invoice_expires_at",
+            )?,
+            lightning_invoice_paid_at: decode_optional_timestamp(
+                &row,
+                "lightning_invoice_paid_at",
+            )?,
         })
     }
 
@@ -379,7 +401,7 @@ impl Database {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            r#"SELECT id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at, session_id
+            r#"SELECT id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at, lightning_quote_id, lightning_invoice_request, lightning_invoice_expires_at, lightning_invoice_paid_at, session_id
             FROM withdrawals WHERE state IN ({}) ORDER BY created_at ASC"#,
             placeholders
         );
@@ -398,7 +420,7 @@ impl Database {
         session_id: &str,
     ) -> Result<Vec<Withdrawal>, Error> {
         let rows = sqlx::query(
-            r#"SELECT id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at, session_id
+            r#"SELECT id, state, delivery_address, max_fee_sats, requested_amount_sats, token_value_sats, token, txid, error, last_attempt_at, attempt_count, created_at, updated_at, token_consumed, swap_fee_sats, payment_request_id, payment_request_creq, payment_request_expires_at, payment_request_fulfilled_at, lightning_quote_id, lightning_invoice_request, lightning_invoice_expires_at, lightning_invoice_paid_at, session_id
             FROM withdrawals WHERE session_id = $1 ORDER BY created_at ASC"#,
         )
         .bind(session_id)
@@ -559,6 +581,48 @@ impl Database {
             return Err(sqlx::Error::RowNotFound);
         }
         Ok(())
+    }
+
+    pub async fn record_lightning_invoice_funded(
+        &self,
+        id: &str,
+        amount_sats: u64,
+        paid_at: DateTime<Utc>,
+    ) -> Result<bool, Error> {
+        let now = paid_at.to_rfc3339();
+        let result = sqlx::query(
+            r#"UPDATE withdrawals
+            SET token_consumed = TRUE,
+                token_value_sats = $2,
+                state = 'queued',
+                lightning_invoice_paid_at = $3,
+                updated_at = $3
+            WHERE id = $1 AND state = 'funding'"#,
+        )
+        .bind(id)
+        .bind(amount_sats as i64)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn mark_lightning_invoice_expired(&self, id: &str) -> Result<bool, Error> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"UPDATE withdrawals
+            SET state = 'failed',
+                error = 'Lightning invoice expired before payment was received',
+                updated_at = $2
+            WHERE id = $1 AND state = 'funding' AND lightning_quote_id IS NOT NULL"#,
+        )
+        .bind(id)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn record_payment_request_token_locked(
@@ -1061,10 +1125,7 @@ impl Database {
         Ok(())
     }
 
-    pub async fn expire_stale_pending_deposits(
-        &self,
-        cutoff: DateTime<Utc>,
-    ) -> Result<u64, Error> {
+    pub async fn expire_stale_pending_deposits(&self, cutoff: DateTime<Utc>) -> Result<u64, Error> {
         let now = Utc::now().to_rfc3339();
         let result = sqlx::query(
             r#"UPDATE deposits
@@ -1664,6 +1725,14 @@ pub struct Withdrawal {
     pub payment_request_expires_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payment_request_fulfilled_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lightning_quote_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lightning_invoice_request: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lightning_invoice_expires_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lightning_invoice_paid_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Copy, Debug)]

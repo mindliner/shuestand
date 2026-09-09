@@ -92,7 +92,9 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   const [flow, setFlow] = useState<Flow>('deposit')
   const [depositAmount, setDepositAmount] = useState(DEFAULT_DEPOSIT_AMOUNT)
   const [withdrawalAmount, setWithdrawalAmount] = useState(DEFAULT_WITHDRAWAL_AMOUNT)
-  const [withdrawalMethod, setWithdrawalMethod] = useState<'token' | 'payment_request'>(
+  const [withdrawalMethod, setWithdrawalMethod] = useState<
+    'token' | 'payment_request' | 'lightning_invoice'
+  >(
     'token'
   )
   const [token, setToken] = useState('')
@@ -933,18 +935,22 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           if (resolvedAmount <= 0 || Number.isNaN(resolvedAmount)) {
             throw new Error('Withdrawal amount must be greater than zero')
           }
-        if (resolvedAmount < withdrawalMinimum) {
-          throw new Error(
-            `Withdrawal amount must be at least ${withdrawalMinimum.toLocaleString()} sats`
-          )
-        }
-        if (resolvedAmount > limits.withdrawalMaxSats) {
-          throw new Error(
-            `Withdrawal amount must be between ${withdrawalMinimum.toLocaleString()} and ${limits.withdrawalMaxSats.toLocaleString()} sats`
-          )
-        }
+          if (resolvedAmount < withdrawalMinimum) {
+            throw new Error(
+              `Withdrawal amount must be at least ${withdrawalMinimum.toLocaleString()} sats`
+            )
+          }
+          if (resolvedAmount > limits.withdrawalMaxSats) {
+            throw new Error(
+              `Withdrawal amount must be between ${withdrawalMinimum.toLocaleString()} and ${limits.withdrawalMaxSats.toLocaleString()} sats`
+            )
+          }
           payload.amount_sats = resolvedAmount
-          payload.create_payment_request = true
+          if (withdrawalMethod === 'payment_request') {
+            payload.create_payment_request = true
+          } else {
+            payload.create_lightning_invoice = true
+          }
         }
 
         const withdrawal = await createWithdrawal(payload, sessionToken)
@@ -1000,9 +1006,11 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
   const supportVisible = deposits.length > 0 || withdrawals.length > 0
 
   const hasSession = Boolean(session)
-  const headerTitle = hasSession ? 'Configure Your Swaps' : 'Shuestand: Onchain/Cashu Swaps'
+  const headerTitle = hasSession
+    ? 'Configure Your Swaps'
+    : 'Shuestand: Onchain, Cashu & Lightning Swaps'
   const headerDescription = hasSession
-    ? 'Simple kiosk-ready interface for funding Cashu wallets from on-chain bitcoin and redeeming ecash back to addresses.'
+    ? 'Simple kiosk-ready interface for funding Cashu wallets from on-chain bitcoin and cashing out to bitcoin addresses from Cashu or Lightning.'
     : 'Sessions keep each kiosk run scoped. Start or resume to track deposits and withdrawals under one claim code.'
   const sessionExpiryText = session?.expiresAt ? new Date(session.expiresAt).toLocaleString() : 'soon'
   const sessionSummaryCard = session ? (
@@ -1045,7 +1053,7 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
             onClick={() => setFlow('withdrawal')}
             type="button"
           >
-            Cashu → Bitcoin
+            Cashu or Lightning → Bitcoin
           </button>
         </div>
         {depositFlowDisabled && (
@@ -1213,9 +1221,19 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                         />
                         Cashu payment request
                       </label>
+                      <label>
+                        <input
+                          type="radio"
+                          name="withdrawal-method"
+                          value="lightning_invoice"
+                          checked={withdrawalMethod === 'lightning_invoice'}
+                          onChange={() => setWithdrawalMethod('lightning_invoice')}
+                        />
+                        Lightning invoice
+                      </label>
                     </div>
                   </div>
-                  {withdrawalMethod === 'payment_request' && (
+                  {withdrawalMethod !== 'token' && (
                     <label>
                       Amount (sats): {Number(withdrawalAmount || withdrawalMinimum).toLocaleString()}
                       <input
@@ -1225,11 +1243,16 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
                         step={WITHDRAWAL_SLIDER_STEP_SATS}
                         value={withdrawalAmount}
                         onChange={(e) => setWithdrawalAmount(e.target.value)}
-                        required={withdrawalMethod === 'payment_request'}
+                        required
                       />
                       <span className="helper">
                         Range {withdrawalMinimum.toLocaleString()}–{displayedWithdrawalMaxSats.toLocaleString()} sats
                       </span>
+                      {withdrawalMethod === 'lightning_invoice' && (
+                        <span className="helper">
+                          Shuestand will show a BOLT11 invoice. Once paid, the on-chain payout starts automatically.
+                        </span>
+                      )}
                     </label>
                   )}
                   {withdrawalMethod === 'token' ? (

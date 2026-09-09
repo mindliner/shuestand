@@ -46,6 +46,12 @@ export interface WithdrawalPaymentRequest {
   fulfilled_at?: string | null
 }
 
+export interface WithdrawalLightningInvoice {
+  request: string
+  expires_at?: string | null
+  fulfilled_at?: string | null
+}
+
 export interface Withdrawal {
   id: string
   state: WithdrawalState
@@ -62,6 +68,7 @@ export interface Withdrawal {
   session_id?: string | null
   swap_fee_sats?: number | null
   payment_request?: WithdrawalPaymentRequest | null
+  lightning_invoice?: WithdrawalLightningInvoice | null
   last_attempt_at?: string | null
   attempt_count: number
   created_at?: string | null
@@ -149,6 +156,7 @@ export interface CreateWithdrawalRequest {
   token?: string
   max_fee_sats?: number
   create_payment_request?: boolean
+  create_lightning_invoice?: boolean
 }
 
 export interface WalletBalanceResponse {

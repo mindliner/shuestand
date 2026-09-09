@@ -278,13 +278,21 @@ export function WithdrawalStatusCard({
   }
 
   const paymentRequest = withdrawal.payment_request ?? null
+  const lightningInvoice = withdrawal.lightning_invoice ?? null
   const paymentExpiresAt = paymentRequest?.expires_at
     ? new Date(paymentRequest.expires_at)
     : null
   const paymentFulfilledAt = paymentRequest?.fulfilled_at
     ? new Date(paymentRequest.fulfilled_at)
     : null
+  const lightningExpiresAt = lightningInvoice?.expires_at
+    ? new Date(lightningInvoice.expires_at)
+    : null
+  const lightningFulfilledAt = lightningInvoice?.fulfilled_at
+    ? new Date(lightningInvoice.fulfilled_at)
+    : null
   const isAwaitingPayment = withdrawal.state === 'funding' && Boolean(paymentRequest)
+  const isAwaitingLightning = withdrawal.state === 'funding' && Boolean(lightningInvoice)
 
   return (
     <div className="status-block">
@@ -348,9 +356,36 @@ export function WithdrawalStatusCard({
         </div>
       )}
 
+      {isAwaitingLightning && lightningInvoice && (
+        <div className="status-block nested">
+          <p>Pay this Lightning invoice to start the on-chain payout.</p>
+          <div className="qr-card">
+            <QRCodeSVG value={lightningInvoice.request} size={180} />
+            <CopyButton label="Copy Lightning invoice" text={lightningInvoice.request} />
+          </div>
+          {lightningExpiresAt && (
+            <p className="status-meta">
+              Expires at {lightningExpiresAt.toLocaleTimeString()} ({
+                Math.max(
+                  0,
+                  Math.floor((lightningExpiresAt.getTime() - Date.now()) / 1000)
+                )
+              }{' '}
+              s left)
+            </p>
+          )}
+        </div>
+      )}
+
       {!isAwaitingPayment && paymentRequest && paymentFulfilledAt && (
         <p className="status-meta success">
           Payment received at {paymentFulfilledAt.toLocaleTimeString()}
+        </p>
+      )}
+
+      {!isAwaitingLightning && lightningInvoice && lightningFulfilledAt && (
+        <p className="status-meta success">
+          Lightning payment received at {lightningFulfilledAt.toLocaleTimeString()}
         </p>
       )}
 

@@ -1,12 +1,15 @@
-use std::sync::Arc;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use async_trait::async_trait;
+use cdk::amount::SplitTarget;
+use cdk::nuts::MintQuoteState;
 use cdk::nuts::Token;
 use cdk::wallet::KeysetFilter;
 use cdk::wallet::ReceiveOptions;
+use chrono::Utc;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
@@ -27,6 +30,7 @@ pub struct WithdrawalWorker {
     metrics: Arc<AppMetrics>,
     operation_mode: Arc<RwLock<OperationMode>>,
     transaction_notifier: Option<Arc<TransactionNotifier>>,
+    cashu_wallet: Option<WalletHandle>,
 }
 
 impl WithdrawalWorker {
@@ -38,6 +42,7 @@ impl WithdrawalWorker {
         metrics: Arc<AppMetrics>,
         operation_mode: Arc<RwLock<OperationMode>>,
         transaction_notifier: Option<Arc<TransactionNotifier>>,
+        cashu_wallet: Option<WalletHandle>,
     ) -> Self {
         Self {
             db,
@@ -47,6 +52,7 @@ impl WithdrawalWorker {
             metrics,
             operation_mode,
             transaction_notifier,
+            cashu_wallet,
         }
     }
 
@@ -68,6 +74,8 @@ impl WithdrawalWorker {
     }
 
     async fn tick(&mut self) -> anyhow::Result<()> {
+        self.tick_funding().await?;
+
         let queued = self
             .db
             .list_withdrawals_by_state(&[WithdrawalState::Queued])
@@ -141,6 +149,96 @@ impl WithdrawalWorker {
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn tick_funding(&self) -> anyhow::Result<()> {
+        let Some(wallet) = self.cashu_wallet.as_ref() else {
+            return Ok(());
+        };
+
+        let funding = self
+            .db
+            .list_withdrawals_by_state(&[WithdrawalState::Funding])
+            .await?;
+        if funding.is_empty() {
+            return Ok(());
+        }
+
+        for withdrawal in funding {
+            if let Some(expires_at) = withdrawal.lightning_invoice_expires_at {
+                if withdrawal.lightning_invoice_paid_at.is_none() && Utc::now() > expires_at {
+                    if self
+                        .db
+                        .mark_lightning_invoice_expired(&withdrawal.id)
+                        .await?
+                    {
+                        tracing::warn!(
+                            target: "backend",
+                            withdrawal_id = %withdrawal.id,
+                            expires_at = %expires_at,
+                            "marked lightning-funded withdrawal as expired"
+                        );
+                    }
+                    continue;
+                }
+            }
+
+            let Some(quote_id) = withdrawal.lightning_quote_id.as_deref() else {
+                continue;
+            };
+
+            let mut quote = {
+                let guard = wallet.lock().await;
+                guard.check_mint_quote_status(quote_id).await?
+            };
+
+            if quote.state == MintQuoteState::Paid {
+                {
+                    let guard = wallet.lock().await;
+                    guard.mint(quote_id, SplitTarget::default(), None).await?;
+                }
+                quote = {
+                    let guard = wallet.lock().await;
+                    guard.check_mint_quote_status(quote_id).await?
+                };
+            }
+
+            if !matches!(quote.state, MintQuoteState::Issued | MintQuoteState::Paid) {
+                continue;
+            }
+
+            let funded_amount = quote
+                .amount_issued
+                .to_u64()
+                .max(quote.amount_paid.to_u64())
+                .max(withdrawal.requested_amount_sats.unwrap_or_default());
+            if funded_amount == 0 {
+                tracing::warn!(
+                    target: "backend",
+                    withdrawal_id = %withdrawal.id,
+                    quote_id,
+                    "lightning quote settled without an issued amount; skipping queue transition"
+                );
+                continue;
+            }
+
+            let paid_at = Utc::now();
+            if self
+                .db
+                .record_lightning_invoice_funded(&withdrawal.id, funded_amount, paid_at)
+                .await?
+            {
+                tracing::info!(
+                    target: "backend",
+                    withdrawal_id = %withdrawal.id,
+                    quote_id,
+                    funded_amount_sats = funded_amount,
+                    "lightning-funded withdrawal queued for on-chain payout"
+                );
+            }
+        }
+
         Ok(())
     }
 }

@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
+use bdk::bitcoin::Network;
 use bdk::bitcoin::bip32::{DerivationPath, ExtendedPrivKey, ExtendedPubKey};
 use bdk::bitcoin::secp256k1::Secp256k1;
-use bdk::bitcoin::Network;
 use bdk::keys::bip39::{Language, Mnemonic};
 use clap::Parser;
 

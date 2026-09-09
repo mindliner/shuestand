@@ -1,10 +1,10 @@
 # Shuestand
 
-**Status:** Alpha (`v0.1.1-alpha`) - not production-ready.
+**Status:** Alpha (`v0.1.2-alpha`) - not production-ready.
 
 > APIs, database schemas, and operational behavior may change without backward compatibility while Shuestand is in alpha.
 
-Shuestand lets users fund a Cashu wallet directly with on-chain Bitcoin or withdraw cashu sats back out, all through a single, kiosk-friendly interface.
+Shuestand lets users fund a Cashu wallet directly with on-chain Bitcoin, withdraw cashu sats back out, or take a paid Lightning invoice all the way to an on-chain payout through a single, kiosk-friendly interface.
 
 ## Why Shuestand?
 Lightning swaps and do-it-yourself Cashu flows already exist with boltz.exchange, but not everybody who likes Bitcoin’s promise wants to juggle routing nodes, mint swaps, or channel policy. Shuestand formalizes a simple dual strategy: save in hardened self-custody, spend from a lightweight privacy wallet, and let the bridge disappear into the background.
@@ -24,6 +24,11 @@ Shuestand ties those two halves together. It keeps Lightning behind the curtain,
    - User pastes/imports a Cashu token, sees a quote (amount, projected miner fee, eta).
    - Funds are redeemed at the mint, credited to our float, and the backend crafts/broadcasts an on-chain payout from the hot wallet (no Lightning dependency).
    - UI shows progress, payout txid + confirmations, and an audit trail for operators.
+
+3. **Lightning → Bitcoin**
+   - User enters a payout address and asks Shuestand for a Lightning invoice.
+   - Once the BOLT11 invoice is paid, the backend mints the received value into the canonical Cashu wallet and automatically continues into the normal on-chain payout path.
+   - The kiosk shows the invoice as QR/text first, then flips into the existing payout progress view.
 
 ### Cross-mint swaps
 - Foreign Cashu tokens are imported into per-mint CDK wallets, melted via Lightning to the kiosk mint, and the resulting proofs are minted before we touch the on-chain payout.
@@ -132,5 +137,3 @@ When the Docker stack lives on an internal host (e.g., `vm-docker:8872`), expose
 
 For full environment setup + tuning (grouped exactly like `infra/docker/backend.env.example`, including small/medium/high throughput presets), see:
 - `docs/ENVIRONMENT_SETUP_AND_TUNING.md`
-
-

@@ -517,6 +517,7 @@ async fn main() -> Result<(), anyhow::Error> {
             metrics.clone(),
             operation_mode.clone(),
             transaction_notifier.clone(),
+            cashu_wallet.clone(),
         );
         tokio::spawn(async move {
             worker.run().await;
@@ -1478,9 +1479,7 @@ impl ChainSource for ElectrumChainSource {
             let txid_for_lookup = txid;
             let client_for_lookup = self.client.clone();
             let received_sats = spawn_blocking(move || {
-                let guard = client_for_lookup
-                    .lock()
-                    .expect("electrum client poisoned");
+                let guard = client_for_lookup.lock().expect("electrum client poisoned");
                 let tx = guard.transaction_get(&txid_for_lookup)?;
                 Ok::<u64, electrum_client::Error>(
                     tx.output

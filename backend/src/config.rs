@@ -270,12 +270,11 @@ impl AppConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .filter(|v| *v > 0)
             .unwrap_or(DEFAULT_PENDING_DEPOSIT_TTL_SECS);
-        let max_pending_deposits_per_session =
-            std::env::var("MAX_PENDING_DEPOSITS_PER_SESSION")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .filter(|v| *v > 0)
-                .unwrap_or(DEFAULT_MAX_PENDING_DEPOSITS_PER_SESSION);
+        let max_pending_deposits_per_session = std::env::var("MAX_PENDING_DEPOSITS_PER_SESSION")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_MAX_PENDING_DEPOSITS_PER_SESSION);
         let float_alert_webhook_url = std::env::var("FLOAT_ALERT_WEBHOOK_URL").ok();
         let transaction_webhook_url = std::env::var("TRANSACTION_WEBHOOK_URL").ok();
         let security_alert_webhook_url = std::env::var("SECURITY_ALERT_WEBHOOK_URL").ok();

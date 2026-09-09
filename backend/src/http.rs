@@ -147,7 +147,10 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/operator/support/messages",
             get(list_operator_support_messages),
         )
-        .route("/api/v1/operator/support/cases", get(list_operator_support_cases))
+        .route(
+            "/api/v1/operator/support/cases",
+            get(list_operator_support_cases),
+        )
         .route(
             "/api/v1/operator/support/cases/:session_id/status",
             post(update_operator_support_case_status),
@@ -323,6 +326,8 @@ struct WithdrawalRequest {
     max_fee_sats: Option<u64>,
     #[serde(default)]
     create_payment_request: bool,
+    #[serde(default)]
+    create_lightning_invoice: bool,
 }
 
 #[derive(Deserialize)]
@@ -345,6 +350,15 @@ struct WithdrawalPaymentRequestView {
 }
 
 #[derive(Serialize)]
+struct WithdrawalLightningInvoiceView {
+    request: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fulfilled_at: Option<String>,
+}
+
+#[derive(Serialize)]
 struct WithdrawalView {
     #[serde(flatten)]
     withdrawal: Withdrawal,
@@ -354,6 +368,8 @@ struct WithdrawalView {
     is_foreign_mint: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     payment_request: Option<WithdrawalPaymentRequestView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lightning_invoice: Option<WithdrawalLightningInvoiceView>,
 }
 
 #[derive(Serialize)]
@@ -402,11 +418,24 @@ impl WithdrawalView {
                         .payment_request_fulfilled_at
                         .map(|ts| ts.to_rfc3339()),
                 });
+        let lightning_invoice = withdrawal
+            .lightning_invoice_request
+            .as_ref()
+            .map(|request| WithdrawalLightningInvoiceView {
+                request: request.clone(),
+                expires_at: withdrawal
+                    .lightning_invoice_expires_at
+                    .map(|ts| ts.to_rfc3339()),
+                fulfilled_at: withdrawal
+                    .lightning_invoice_paid_at
+                    .map(|ts| ts.to_rfc3339()),
+            });
         Self {
             withdrawal,
             source_mint_url,
             is_foreign_mint,
             payment_request,
+            lightning_invoice,
         }
     }
 }
@@ -831,7 +860,11 @@ async fn start_session(
     }
 
     if let Some(subnet_hint) = client_subnet_hint(&client_hint) {
-        let subnet_burst = detect_burst("session_start_subnet", &subnet_hint, SESSION_BURST_WINDOW_SECS);
+        let subnet_burst = detect_burst(
+            "session_start_subnet",
+            &subnet_hint,
+            SESSION_BURST_WINDOW_SECS,
+        );
         if subnet_burst >= SESSION_BURST_THRESHOLD_PER_SUBNET {
             emit_security_alert(
                 &state,
@@ -940,8 +973,7 @@ async fn create_deposit(
         mode => return Err(mode_blocked(mode, "deposits")),
     }
 
-    let pending_cutoff =
-        Utc::now() - Duration::seconds(state.pending_deposit_ttl_secs as i64);
+    let pending_cutoff = Utc::now() - Duration::seconds(state.pending_deposit_ttl_secs as i64);
     if let Err(err) = state.db.expire_stale_pending_deposits(pending_cutoff).await {
         tracing::warn!(target: "backend", error = %err, "failed to expire stale pending deposits");
     }
@@ -1202,7 +1234,11 @@ async fn submit_support_message(
         return Err(invalid_request("support_message_too_long"));
     }
 
-    let deposits = state.db.list_deposits_by_session(&session.id).await.map_err(server_error)?;
+    let deposits = state
+        .db
+        .list_deposits_by_session(&session.id)
+        .await
+        .map_err(server_error)?;
     let withdrawals = state
         .db
         .list_withdrawals_by_session(&session.id)
@@ -1229,12 +1265,7 @@ async fn submit_support_message(
 
     let saved = state
         .db
-        .create_support_message(
-            &session.id,
-            "customer",
-            message,
-            req.context,
-        )
+        .create_support_message(&session.id, "customer", message, req.context)
         .await
         .map_err(server_error)?;
 
@@ -1269,14 +1300,18 @@ async fn request_withdrawal(
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    if token_raw.is_none() && !req.create_payment_request {
+    let funding_variant_count = usize::from(token_raw.is_some())
+        + usize::from(req.create_payment_request)
+        + usize::from(req.create_lightning_invoice);
+
+    if funding_variant_count == 0 {
         return Err(invalid_request(
-            "token is required unless create_payment_request is true",
+            "provide either a token, create_payment_request, or create_lightning_invoice",
         ));
     }
-    if token_raw.is_some() && req.create_payment_request {
+    if funding_variant_count > 1 {
         return Err(invalid_request(
-            "token and create_payment_request cannot both be provided",
+            "token, create_payment_request, and create_lightning_invoice are mutually exclusive",
         ));
     }
 
@@ -1373,6 +1408,10 @@ async fn request_withdrawal(
         payment_request_creq: None,
         payment_request_expires_at: None,
         payment_request_fulfilled_at: None,
+        lightning_quote_id: None,
+        lightning_invoice_request: None,
+        lightning_invoice_expires_at: None,
+        lightning_invoice_paid_at: None,
     };
 
     let known_mint = if let Some(token) = &withdrawal.token {
@@ -1398,7 +1437,7 @@ async fn request_withdrawal(
             );
         }
         Some(mint_url)
-    } else {
+    } else if req.create_payment_request {
         let canonical_mint = match state.cashu_mint_url.as_deref() {
             Some(mint) => mint.to_string(),
             None => return Err(unavailable("cashu mint not configured")),
@@ -1443,6 +1482,36 @@ async fn request_withdrawal(
         withdrawal.payment_request_creq = Some(encoded);
         withdrawal.payment_request_expires_at = Some(expires_at);
         Some(canonical_mint)
+    } else if req.create_lightning_invoice {
+        let wallet = state
+            .cashu_wallet
+            .clone()
+            .ok_or_else(|| unavailable("cashu wallet not configured"))?;
+        let invoice_amount = req
+            .amount_sats
+            .checked_add(state.withdrawal_fee_buffer_sats)
+            .ok_or_else(|| invalid_request("requested amount is too large"))?;
+        let quote = {
+            let guard = wallet.lock().await;
+            guard
+                .mint_quote(
+                    PaymentMethod::Known(KnownMethod::Bolt11),
+                    Some(Amount::from(invoice_amount)),
+                    None,
+                    None,
+                )
+                .await
+                .map_err(server_error)?
+        };
+        withdrawal.state = WithdrawalState::Funding;
+        withdrawal.lightning_quote_id = Some(quote.id);
+        withdrawal.lightning_invoice_request = Some(quote.request);
+        withdrawal.lightning_invoice_expires_at = unix_seconds_to_datetime(quote.expiry);
+        None
+    } else {
+        return Err(invalid_request(
+            "provide either a token, create_payment_request, or create_lightning_invoice",
+        ));
     };
 
     state
@@ -2578,8 +2647,7 @@ async fn get_ledger_snapshot(
 ) -> ApiResult<LedgerSnapshotResponse> {
     require_operator_token(&state, &headers)?;
 
-    let pending_cutoff =
-        Utc::now() - Duration::seconds(state.pending_deposit_ttl_secs as i64);
+    let pending_cutoff = Utc::now() - Duration::seconds(state.pending_deposit_ttl_secs as i64);
     if let Err(err) = state.db.expire_stale_pending_deposits(pending_cutoff).await {
         tracing::warn!(target: "backend", error = %err, "failed to expire stale pending deposits");
     }
@@ -2976,6 +3044,10 @@ fn format_bip21(address: &str, label: Option<&str>) -> String {
         }
         _ => format!("bitcoin:{}", address),
     }
+}
+
+fn unix_seconds_to_datetime(ts: u64) -> Option<chrono::DateTime<Utc>> {
+    chrono::DateTime::<Utc>::from_timestamp(ts as i64, 0)
 }
 
 fn payment_method_label(method: &PaymentMethod) -> &'static str {

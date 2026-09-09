@@ -150,7 +150,6 @@ impl DepositWorker {
 
         Ok(())
     }
-
 }
 
 #[derive(PartialEq, Eq)]
