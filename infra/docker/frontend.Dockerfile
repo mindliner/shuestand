@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
-FROM node:20 AS builder
+FROM node:24-bookworm AS builder
 WORKDIR /app
 COPY frontend/package*.json ./
-RUN npm install
+RUN npm ci
 COPY frontend ./
 COPY .git ./.git
 COPY backend/Cargo.toml /backend/Cargo.toml

@@ -91,6 +91,10 @@ const MAX_API_BODY_BYTES: usize = 1024 * 1024;
 static SECURITY_WINDOW_BUCKETS: OnceLock<Mutex<HashMap<String, Vec<i64>>>> = OnceLock::new();
 
 pub fn router(state: AppState) -> Router {
+    api_routes().with_state(state)
+}
+
+fn api_routes() -> Router<AppState> {
     Router::new()
         .layer(DefaultBodyLimit::max(MAX_API_BODY_BYTES))
         .route("/healthz", get(healthcheck))
@@ -99,13 +103,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/sessions", post(start_session))
         .route("/api/v1/sessions/resume", post(resume_session))
         .route("/api/v1/deposits", post(create_deposit))
-        .route("/api/v1/deposits/:id", get(get_deposit))
-        .route("/api/v1/deposits/:id/pickup", post(pickup_deposit))
+        .route("/api/v1/deposits/{id}", get(get_deposit))
+        .route("/api/v1/deposits/{id}/pickup", post(pickup_deposit))
         .route("/api/v1/support/messages", post(submit_support_message))
         .route("/api/v1/withdrawals", post(request_withdrawal))
-        .route("/api/v1/withdrawals/:id", get(get_withdrawal))
+        .route("/api/v1/withdrawals/{id}", get(get_withdrawal))
         .route(
-            "/api/v1/withdrawals/:id/nut18",
+            "/api/v1/withdrawals/{id}/nut18",
             post(submit_payment_request),
         )
         .route("/api/v1/wallet/balance", get(get_wallet_balance))
@@ -113,8 +117,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/wallet/sync", post(sync_wallet))
         .route("/api/v1/wallet/topup", get(get_wallet_topup))
         .route("/api/v1/cashu/invoices", post(create_cashu_invoice))
-        .route("/api/v1/cashu/invoices/:id", get(get_cashu_invoice))
-        .route("/api/v1/cashu/invoices/:id/mint", post(mint_cashu_invoice))
+        .route("/api/v1/cashu/invoices/{id}", get(get_cashu_invoice))
+        .route("/api/v1/cashu/invoices/{id}/mint", post(mint_cashu_invoice))
         .route(
             "/api/v1/cashu/wallet/balance",
             get(get_cashu_wallet_balance),
@@ -124,7 +128,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/operator/ledger", get(get_ledger_snapshot))
         .route("/api/v1/operator/deposits", get(list_operator_deposits))
         .route(
-            "/api/v1/operator/deposits/:id/actions",
+            "/api/v1/operator/deposits/{id}/actions",
             post(operate_deposit),
         )
         .route(
@@ -132,7 +136,7 @@ pub fn router(state: AppState) -> Router {
             get(list_operator_withdrawals),
         )
         .route(
-            "/api/v1/operator/withdrawals/:id/actions",
+            "/api/v1/operator/withdrawals/{id}/actions",
             post(operate_withdrawal),
         )
         .route(
@@ -152,11 +156,11 @@ pub fn router(state: AppState) -> Router {
             get(list_operator_support_cases),
         )
         .route(
-            "/api/v1/operator/support/cases/:session_id/status",
+            "/api/v1/operator/support/cases/{session_id}/status",
             post(update_operator_support_case_status),
         )
         .route(
-            "/api/v1/operator/sessions/:id/details",
+            "/api/v1/operator/sessions/{id}/details",
             get(get_operator_session_details),
         )
         .route(
@@ -164,7 +168,6 @@ pub fn router(state: AppState) -> Router {
             get(get_operation_mode).post(update_operation_mode),
         )
         .route("/api/v1/float/status", get(get_float_status))
-        .with_state(state)
 }
 
 #[derive(Serialize)]
@@ -3319,4 +3322,14 @@ fn server_error<E: std::fmt::Display>(err: E) -> (StatusCode, Json<ApiError>) {
             message: err.to_string(),
         }),
     )
+}
+
+#[cfg(test)]
+mod dependency_upgrade_tests {
+    #[test]
+    fn all_api_routes_register_with_axum_08() {
+        // Axum 0.8 rejects legacy :id routes at runtime, not compilation time.
+        // Construct the real route table without connecting to wallets or Postgres.
+        let _ = super::api_routes();
+    }
 }

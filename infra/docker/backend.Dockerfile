@@ -12,7 +12,7 @@ COPY backend/src ./backend/src
 COPY backend/migrations ./backend/migrations
 COPY vendor ./vendor
 WORKDIR /app/backend
-RUN cargo build --release
+RUN cargo build --release --locked
 
 FROM debian:bookworm-slim
 RUN useradd --create-home shuestand

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.3-beta — 2026-10-25
+- Applied the teal light/dark theme, compact corners and shadows, with locally bundled Source Code Pro.
+- Refreshed backend/frontend dependencies, including Axum 0.8, tower-http 0.7, BDK 0.30, React 19.3, Vite 8.3, TypeScript 6 and ESLint 10.
+- Migrated Axum capture syntax and added API route-registration regression coverage.
+- Updated the frontend Docker builder to Node 24 and reproducible `npm ci` installs.
+- Retained SQLx/CDK compatibility constraints; see `docs/DEPENDENCY_UPDATES.md` for follow-up migrations and lint debt.
+
 ## 2026-09-09
 - Added a Lightning→Bitcoin payout path to kiosk withdrawals: users can now request a BOLT11 funding invoice, then Shuestand automatically mints the paid quote into float and reuses the existing on-chain payout worker.
 - Extended the withdrawal state payload/UI with embedded Lightning invoice metadata so the kiosk can show QR/copy actions and a paid timestamp while the withdrawal sits in `funding`.

@@ -1,8 +1,8 @@
 # Shuestand
 
-**Status:** Alpha (`v0.1.2-alpha`) - not production-ready.
+**Status:** Beta (`v0.1.3-beta`) - not production-ready.
 
-> APIs, database schemas, and operational behavior may change without backward compatibility while Shuestand is in alpha.
+> APIs, database schemas, and operational behavior may change without backward compatibility while Shuestand is in beta.
 
 Shuestand lets users fund a Cashu wallet directly with on-chain Bitcoin, withdraw cashu sats back out, or take a paid Lightning invoice all the way to an on-chain payout through a single, kiosk-friendly interface.
 
