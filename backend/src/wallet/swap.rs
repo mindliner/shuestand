@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,7 +8,9 @@ use cdk::Amount;
 use cdk::amount::SplitTarget;
 use cdk::nuts::Token;
 use cdk::nuts::nut00::KnownMethod;
-use cdk::nuts::{PaymentMethod, ProofsMethods, State};
+use cdk::nuts::{
+    MeltQuoteState, PaymentMethod, ProofState, Proofs, ProofsMethods, PublicKey, State,
+};
 use cdk::wallet::{KeysetFilter, MeltQuote, ReceiveOptions};
 use thiserror::Error;
 use tokio::time::sleep;
@@ -55,27 +57,22 @@ impl MintSwapService {
         expected_amount: Option<u64>,
     ) -> anyhow::Result<MintSwapOutcome> {
         let foreign_wallet = self.manager.wallet_for_mint(foreign_mint_url).await?;
-        let original_amount = self
-            .receive_foreign_token(
-                &foreign_wallet,
-                foreign_mint_url,
-                token_raw,
-                expected_amount,
-            )
-            .await?;
-        if original_amount == 0 {
-            return Err(anyhow!("foreign token had zero value"));
-        }
-
-        let (mut proofs_total, mut input_fee_total) = self
-            .spendable_amount_and_fee(&foreign_wallet)
-            .await
-            .context("reading foreign wallet balance for swap")?;
-        if proofs_total == 0 || proofs_total <= input_fee_total {
+        // Never infer ownership from a spent-token error or a pooled wallet balance.
+        let original_amount =
+            crate::cashu::token_total_amount(token_raw).map_err(|err| anyhow!(err.to_string()))?;
+        if expected_amount.is_some_and(|expected| expected != original_amount) {
             return Err(anyhow!(
-                "foreign wallet has no spendable balance after importing token"
+                "foreign token amount does not match expected amount"
             ));
         }
+        let (received_amount, proofs) = self
+            .receive_foreign_token(&foreign_wallet, token_raw)
+            .await?;
+        validate_conversion_amount(original_amount, received_amount)?;
+        let (proofs_total, input_fee_total) = self
+            .spendable_amount_and_fee(&foreign_wallet, &proofs)
+            .await
+            .context("checking transaction-specific foreign proofs")?;
 
         let canonical_wallet = self.manager.canonical_wallet();
         let mut target_amount = proofs_total
@@ -84,9 +81,7 @@ impl MintSwapService {
         let mut last_err: Option<anyhow::Error> = None;
 
         for _ in 0..=MAX_MELT_FEE_REDUCTIONS {
-            if target_amount == 0 {
-                break;
-            }
+            validate_conversion_amount(original_amount, target_amount)?;
 
             let quote = {
                 let guard = canonical_wallet.lock().await;
@@ -120,7 +115,7 @@ impl MintSwapService {
                 .saturating_add(input_fee_total);
             if needed > proofs_total {
                 let mut next_target = proofs_total
-                    .saturating_sub(input_fee_total + fee_reserve)
+                    .saturating_sub(input_fee_total.saturating_add(fee_reserve))
                     .min(target_amount);
                 if next_target >= target_amount {
                     next_target = target_amount.saturating_sub(fee_reserve.max(1));
@@ -145,51 +140,29 @@ impl MintSwapService {
             }
 
             match self
-                .confirm_melt_with_quote(&foreign_wallet, melt_quote)
+                .confirm_melt_with_quote(&foreign_wallet, melt_quote, &proofs)
                 .await
             {
                 Ok(_) => {
                     let canonical_amount = self
                         .mint_canonical_proofs(&canonical_wallet, &quote.id)
                         .await?;
+                    if canonical_amount != target_amount {
+                        return Err(anyhow!(
+                            "canonical mint amount differs from paid invoice; reconciliation required"
+                        ));
+                    }
                     return Ok(MintSwapOutcome {
                         original_amount_sats: original_amount,
                         canonical_amount_sats: canonical_amount,
                     });
                 }
                 Err(MeltPaymentError::InsufficientFunds { fee_reserve }) => {
-                    last_err = Some(anyhow!(
-                        "insufficient melt balance (fee_reserve={fee_reserve})"
+                    // No balance-based retry after a prepared operation: its proofs may
+                    // be reserved or payment may be ambiguous. Keep evidence for recovery.
+                    return Err(anyhow!(
+                        "insufficient melt balance (fee_reserve={fee_reserve}); reconciliation required"
                     ));
-                    let (updated_total, updated_fee) = self
-                        .spendable_amount_and_fee(&foreign_wallet)
-                        .await
-                        .context("refreshing foreign wallet balance after melt failure")?;
-                    proofs_total = updated_total;
-                    input_fee_total = updated_fee;
-                    if proofs_total == 0 || proofs_total <= input_fee_total {
-                        break;
-                    }
-                    let mut next_target = proofs_total
-                        .saturating_sub(input_fee_total + fee_reserve)
-                        .min(target_amount);
-                    if next_target >= target_amount {
-                        next_target = target_amount.saturating_sub(fee_reserve.max(1));
-                    }
-                    if next_target == 0 {
-                        break;
-                    }
-                    tracing::warn!(
-                        target: "backend",
-                        target_amount,
-                        fee_reserve,
-                        spendable_sats = proofs_total,
-                        input_fee_sats = input_fee_total,
-                        next_target,
-                        "foreign melt still reported insufficient funds after swap; shrinking invoice again"
-                    );
-                    target_amount = next_target;
-                    continue;
                 }
                 Err(MeltPaymentError::Other(err)) => {
                     return Err(err);
@@ -205,48 +178,37 @@ impl MintSwapService {
     async fn receive_foreign_token(
         &self,
         wallet: &WalletHandle,
-        mint_url: &str,
         token_raw: &str,
-        expected_amount: Option<u64>,
-    ) -> anyhow::Result<u64> {
-        let receive_result = receive_with_all_keysets(wallet, token_raw).await;
-
-        match receive_result {
-            Ok(amount) => Ok(amount.to_u64()),
-            Err(err) => {
-                let message = err.to_string();
-                if message.contains("Invalid DLEQ proof") {
-                    tracing::warn!(
-                        target: "backend",
-                        mint_url = %mint_url,
-                        token_chars = token_raw.len(),
-                        expected_amount_sats = expected_amount.unwrap_or(0),
-                        "foreign mint rejected token due to invalid DLEQ proof"
-                    );
-                }
-                if let Some(expected) = expected_amount {
-                    if message.contains("Token Already Spent") {
-                        tracing::warn!(
-                            target: "backend",
-                            expected_amount = expected,
-                            "foreign token already imported; reusing existing proofs"
-                        );
-                        return Ok(expected);
-                    }
-                }
-                Err(err.into())
-            }
-        }
+    ) -> anyhow::Result<(u64, Proofs)> {
+        let token = Token::from_str(token_raw)?;
+        // Keep the snapshot, receive and output capture under one wallet lock.
+        let guard = wallet.lock().await;
+        let before = guard.get_proofs_with(None, None).await?.ys()?;
+        let keysets = guard.get_mint_keysets(KeysetFilter::All).await?;
+        let inputs = token.proofs(&keysets)?;
+        let received = guard.receive_proofs(
+            inputs, ReceiveOptions::default(), token.memo().clone(),
+            Some(token_raw.to_string()),
+        ).await.context("receiving foreign token; do not reuse pooled proofs on failure, reconcile this operation before retrying")?;
+        let after = guard.get_unspent_proofs().await?;
+        let proofs = received_proofs(&before, after, received.to_u64())?;
+        Ok((received.to_u64(), proofs))
     }
 
     async fn confirm_melt_with_quote(
         &self,
         wallet: &WalletHandle,
         melt_quote: MeltQuote,
+        proofs: &Proofs,
     ) -> Result<(), MeltPaymentError> {
         let guard = wallet.lock().await;
+        let states = guard
+            .check_proofs_spent(proofs.clone())
+            .await
+            .map_err(|err| MeltPaymentError::Other(anyhow!("checking melt proof states: {err}")))?;
+        require_unspent(proofs, &states).map_err(MeltPaymentError::Other)?;
         let prepared = guard
-            .prepare_melt(&melt_quote.id, HashMap::new())
+            .prepare_melt_proofs(&melt_quote.id, proofs.clone(), HashMap::new())
             .await
             .map_err(|err| {
                 let message = err.to_string();
@@ -258,9 +220,14 @@ impl MintSwapService {
                 }
             })?;
 
-        prepared.confirm().await.map_err(|err| {
+        let finalized = prepared.confirm().await.map_err(|err| {
             MeltPaymentError::Other(anyhow!("confirming melt/payment from foreign mint: {err}"))
         })?;
+        if finalized.state() != MeltQuoteState::Paid {
+            return Err(MeltPaymentError::Other(anyhow!(
+                "foreign melt not paid; reconciliation required"
+            )));
+        }
         Ok(())
     }
 
@@ -301,18 +268,20 @@ impl MintSwapService {
         ))
     }
 
-    async fn spendable_amount_and_fee(&self, wallet: &WalletHandle) -> anyhow::Result<(u64, u64)> {
+    async fn spendable_amount_and_fee(
+        &self,
+        wallet: &WalletHandle,
+        proofs: &Proofs,
+    ) -> anyhow::Result<(u64, u64)> {
         let guard = wallet.lock().await;
-        let proofs = guard
-            .get_proofs_with(Some(vec![State::Unspent]), None)
-            .await
-            .context("fetching unspent proofs for swap")?;
+        let states = guard.check_proofs_spent(proofs.clone()).await?;
+        require_unspent(proofs, &states)?;
         let total = proofs
             .total_amount()
             .context("summing foreign proof amounts")?
             .to_u64();
         let fee = guard
-            .get_proofs_fee(&proofs)
+            .get_proofs_fee(proofs)
             .await
             .context("estimating input fee for foreign proofs")?
             .total
@@ -321,20 +290,113 @@ impl MintSwapService {
     }
 }
 
-async fn receive_with_all_keysets(
-    wallet: &WalletHandle,
-    token_raw: &str,
-) -> Result<cdk::Amount, cdk::Error> {
-    let token = Token::from_str(token_raw)?;
-    let guard = wallet.lock().await;
-    let keysets = guard.get_mint_keysets(KeysetFilter::All).await?;
-    let proofs = token.proofs(&keysets)?;
-    guard
-        .receive_proofs(
-            proofs,
-            ReceiveOptions::default(),
-            token.memo().clone(),
-            Some(token_raw.to_string()),
+// Safety ceiling, not a quoted or charged fee. Refuse excessive loss before paying.
+// Five percent accommodates the observed ~3% reserve without allowing dust fallback.
+pub(crate) fn validate_conversion_amount(original: u64, converted: u64) -> anyhow::Result<()> {
+    if original == 0
+        || converted == 0
+        || converted > original
+        || original - converted > original / 20
+    {
+        return Err(anyhow!(
+            "conversion exceeds 5% loss limit or has invalid amount; reconciliation required"
+        ));
+    }
+    Ok(())
+}
+
+fn received_proofs(before: &[PublicKey], after: Proofs, received: u64) -> anyhow::Result<Proofs> {
+    let existing: HashSet<_> = before.iter().copied().collect();
+    let mut fresh = Vec::new();
+    for proof in after {
+        if !existing.contains(&proof.y()?) {
+            fresh.push(proof);
+        }
+    }
+    if fresh.is_empty() || fresh.total_amount()?.to_u64() != received {
+        return Err(anyhow!(
+            "received proofs do not match receive amount; reconciliation required"
+        ));
+    }
+    Ok(fresh)
+}
+
+fn require_unspent(proofs: &Proofs, states: &[ProofState]) -> anyhow::Result<()> {
+    let expected: HashSet<_> = proofs.ys()?.into_iter().collect();
+    let returned: HashSet<_> = states.iter().map(|state| state.y).collect();
+    if expected.is_empty()
+        || expected.len() != proofs.len()
+        || returned != expected
+        || states.len() != expected.len()
+        || states.iter().any(|state| state.state != State::Unspent)
+    {
+        return Err(anyhow!(
+            "proofs are spent, pending or have incomplete mint state; reconciliation required"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cdk::nuts::{Id, Proof};
+
+    fn proof(secret: &str, amount: u64) -> Proof {
+        Proof::new(
+            Amount::from(amount),
+            Id::from_str("008aa8c3ea7e4220").unwrap(),
+            cdk::secret::Secret::new(secret),
+            PublicKey::from_str(
+                "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            )
+            .unwrap(),
         )
-        .await
+    }
+
+    #[test]
+    fn isolates_receive_outputs_from_old_wallet_proofs() {
+        let stale = proof("old July proof", 4096);
+        let unrelated = proof("another customer's proof", 32768);
+        let fresh = proof("this customer's replacement", 114998);
+        let before = vec![stale.clone(), unrelated.clone()].ys().unwrap();
+        let selected =
+            received_proofs(&before, vec![stale, fresh.clone(), unrelated], 114998).unwrap();
+        assert_eq!(selected, vec![fresh]);
+    }
+
+    #[test]
+    fn missing_receive_outputs_cannot_fall_back_to_wallet_dust() {
+        let dust = proof("unrelated dust", 18);
+        let before = vec![dust.clone()].ys().unwrap();
+        assert!(received_proofs(&before, vec![dust], 114998).is_err());
+        assert!(received_proofs(&[], vec![proof("partial receive", 13)], 114998).is_err());
+    }
+
+    #[test]
+    fn rejects_spent_pending_missing_duplicate_and_unexpected_mint_states() {
+        let proofs = vec![proof("fresh", 1000)];
+        let y = proofs.ys().unwrap()[0];
+        let unspent = ProofState::from((y, State::Unspent));
+        assert!(require_unspent(&proofs, std::slice::from_ref(&unspent)).is_ok());
+        for state in [State::Spent, State::Pending, State::Reserved] {
+            assert!(require_unspent(&proofs, &[ProofState::from((y, state))]).is_err());
+        }
+        assert!(require_unspent(&proofs, &[]).is_err());
+        assert!(require_unspent(&proofs, &[unspent.clone(), unspent]).is_err());
+        let other = proof("unexpected", 1000).y().unwrap();
+        assert!(require_unspent(&proofs, &[ProofState::from((other, State::Unspent))]).is_err());
+    }
+
+    #[test]
+    fn bounds_conversion_before_payment_instead_of_redeeming_dust() {
+        assert!(validate_conversion_amount(115000, 13).is_err());
+        assert!(validate_conversion_amount(115000, 114998).is_ok());
+        assert!(validate_conversion_amount(33000, 31999).is_ok());
+        assert!(validate_conversion_amount(10000, 9500).is_ok());
+        assert!(validate_conversion_amount(10000, 9499).is_err());
+        assert!(validate_conversion_amount(0, 0).is_err());
+        assert!(validate_conversion_amount(100, 101).is_err());
+        assert!(validate_conversion_amount(u64::MAX, u64::MAX).is_ok());
+    }
 }

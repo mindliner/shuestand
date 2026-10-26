@@ -288,7 +288,7 @@ impl CashuRedeemer for CdkCashuRedeemer {
                 Ok(amount) => {
                     return Ok(CashuRedeemResult {
                         amount_sats: amount.to_u64(),
-                        swap_fee_sats: None,
+                        swap_fee_sats: Some(token_amount.saturating_sub(amount.to_u64())),
                     });
                 }
                 Err(err) => {
@@ -353,15 +353,26 @@ pub struct CashuRedeemingExecutor {
 impl WithdrawalExecutor for CashuRedeemingExecutor {
     async fn execute(&self, withdrawal: &Withdrawal) -> Result<WithdrawalOutcome, anyhow::Error> {
         let amount_sats = if withdrawal.token_consumed {
-            withdrawal
+            let amount = withdrawal
                 .token_value_sats
-                .ok_or_else(|| anyhow!("withdrawal marked consumed without amount"))?
+                .ok_or_else(|| anyhow!("withdrawal marked consumed without amount"))?;
+            validate_redemption(
+                withdrawal.requested_amount_sats,
+                amount,
+                withdrawal.swap_fee_sats,
+            )?;
+            amount
         } else {
             let token = withdrawal
                 .token
                 .as_deref()
                 .ok_or_else(|| anyhow!("withdrawal missing token payload"))?;
             let redeemed = self.redeemer.redeem(token).await?;
+            validate_redemption(
+                withdrawal.requested_amount_sats,
+                redeemed.amount_sats,
+                redeemed.swap_fee_sats,
+            )?;
             self.db
                 .record_token_consumed(&withdrawal.id, redeemed.amount_sats, redeemed.swap_fee_sats)
                 .await?;
@@ -403,15 +414,26 @@ impl CashuToOnchainExecutor {
 impl WithdrawalExecutor for CashuToOnchainExecutor {
     async fn execute(&self, withdrawal: &Withdrawal) -> Result<WithdrawalOutcome, anyhow::Error> {
         let amount_sats = if withdrawal.token_consumed {
-            withdrawal
+            let amount = withdrawal
                 .token_value_sats
-                .ok_or_else(|| anyhow!("withdrawal marked consumed without amount"))?
+                .ok_or_else(|| anyhow!("withdrawal marked consumed without amount"))?;
+            validate_redemption(
+                withdrawal.requested_amount_sats,
+                amount,
+                withdrawal.swap_fee_sats,
+            )?;
+            amount
         } else {
             let token = withdrawal
                 .token
                 .as_deref()
                 .ok_or_else(|| anyhow!("withdrawal missing token payload"))?;
             let redeemed = self.redeemer.redeem(token).await?;
+            validate_redemption(
+                withdrawal.requested_amount_sats,
+                redeemed.amount_sats,
+                redeemed.swap_fee_sats,
+            )?;
             self.db
                 .record_token_consumed(&withdrawal.id, redeemed.amount_sats, redeemed.swap_fee_sats)
                 .await?;
@@ -421,20 +443,9 @@ impl WithdrawalExecutor for CashuToOnchainExecutor {
         let requested_amount = withdrawal
             .requested_amount_sats
             .ok_or_else(|| anyhow!("withdrawal missing requested_amount_sats"))?;
-        let payout_amount = if amount_sats < requested_amount {
-            let shortfall = requested_amount - amount_sats;
-            tracing::warn!(
-                target: "backend",
-                withdrawal_id = %withdrawal.id,
-                requested_amount_sats = requested_amount,
-                redeemed_amount_sats = amount_sats,
-                shortfall_sats = shortfall,
-                "redeemed amount is below requested payout; continuing with redeemed amount"
-            );
-            amount_sats
-        } else {
-            requested_amount
-        };
+        // Validation above permits only explicitly accounted, bounded swap fees.
+        // Never turn an arbitrary shortfall into a successful smaller withdrawal.
+        let payout_amount = amount_sats.min(requested_amount);
 
         let fee_rate = self.fee_estimator.fast_rate().await.max(0.1);
         let txid = self
@@ -448,6 +459,26 @@ impl WithdrawalExecutor for CashuToOnchainExecutor {
             txid: Some(txid),
         })
     }
+}
+
+fn validate_redemption(
+    requested: Option<u64>,
+    redeemed: u64,
+    swap_fee: Option<u64>,
+) -> anyhow::Result<()> {
+    let requested = requested.ok_or_else(|| anyhow!("withdrawal missing requested_amount_sats"))?;
+    if redeemed == 0 || requested == 0 {
+        return Err(anyhow!("zero-value withdrawal redemption"));
+    }
+    if redeemed < requested {
+        crate::wallet::validate_conversion_amount(requested, redeemed)?;
+        if swap_fee != Some(requested - redeemed) {
+            return Err(anyhow!(
+                "redemption shortfall does not match recorded swap fee; reconciliation required"
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub struct MockWithdrawalExecutor;
@@ -467,5 +498,97 @@ impl WithdrawalExecutor for MockWithdrawalExecutor {
             token_value_sats: Some(inferred_amount),
             txid: Some(format!("mock-tx-{}", withdrawal.id)),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DustRedeemer;
+
+    #[async_trait]
+    impl CashuRedeemer for DustRedeemer {
+        async fn redeem(&self, _: &str) -> anyhow::Result<CashuRedeemResult> {
+            Ok(CashuRedeemResult {
+                amount_sats: 13,
+                swap_fee_sats: Some(114987),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_rejects_dust_before_recording_consumption_and_on_consumed_retry() {
+        // A lazy, closed pool makes any accidental database write fail distinctly.
+        // No database server or mint is contacted by this regression test.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        pool.close().await;
+        let executor = CashuRedeemingExecutor {
+            redeemer: Arc::new(DustRedeemer),
+            db: Database { pool },
+        };
+        let mut withdrawal = Withdrawal {
+            id: "regression-115k".into(),
+            state: WithdrawalState::Queued,
+            delivery_address: "unused".into(),
+            requested_amount_sats: Some(115000),
+            token: Some("synthetic-test-input".into()),
+            attempt_count: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            token_consumed: false,
+            max_fee_sats: None,
+            token_value_sats: None,
+            txid: None,
+            error: None,
+            last_attempt_at: None,
+            session_id: None,
+            swap_fee_sats: None,
+            payment_request_id: None,
+            payment_request_creq: None,
+            payment_request_expires_at: None,
+            payment_request_fulfilled_at: None,
+            lightning_quote_id: None,
+            lightning_invoice_request: None,
+            lightning_invoice_expires_at: None,
+            lightning_invoice_paid_at: None,
+        };
+        let error = executor
+            .execute(&withdrawal)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("5% loss limit"), "{error}");
+        withdrawal.token_consumed = true;
+        withdrawal.token_value_sats = Some(13);
+        withdrawal.swap_fee_sats = Some(114987);
+        let error = executor
+            .execute(&withdrawal)
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("5% loss limit"), "{error}");
+    }
+
+    #[test]
+    fn rejects_incident_dust_even_with_recorded_shortfall_as_fee() {
+        // Also applied to token_consumed retries, before the on-chain send.
+        assert!(validate_redemption(Some(115000), 13, Some(114987)).is_err());
+    }
+
+    #[test]
+    fn permits_full_redemption_and_accounted_bounded_conversion_fees() {
+        assert!(validate_redemption(Some(115000), 115000, None).is_ok());
+        assert!(validate_redemption(Some(33000), 31999, Some(1001)).is_ok());
+        assert!(validate_redemption(Some(33000), 31999, None).is_err());
+        assert!(validate_redemption(Some(33000), 31999, Some(999)).is_err());
+        assert!(validate_redemption(None, 33000, None).is_err());
+        assert!(validate_redemption(Some(33000), 0, None).is_err());
+        // Overfunding still pays at most the requested amount.
+        assert!(validate_redemption(Some(33000), 34000, None).is_ok());
     }
 }

@@ -14,6 +14,7 @@ use rand::rngs::OsRng;
 use tokio::sync::Mutex;
 
 pub use multi::MultiMintWalletManager;
+pub(crate) use swap::validate_conversion_amount;
 pub use swap::{MintSwapOutcome, MintSwapService};
 pub type WalletHandle = Arc<Mutex<CashuWallet>>;
 
@@ -37,6 +38,10 @@ impl WalletConfig {
 }
 
 pub async fn open_wallet(config: &WalletConfig) -> Result<WalletHandle> {
+    open_wallet_with_recovery(config, true).await
+}
+
+async fn open_wallet_with_recovery(config: &WalletConfig, recover: bool) -> Result<WalletHandle> {
     let base_dir = config.base_dir();
     let seed = load_or_generate_seed(&base_dir)?;
 
@@ -46,7 +51,9 @@ pub async fn open_wallet(config: &WalletConfig) -> Result<WalletHandle> {
     let localstore = Arc::new(db);
 
     let wallet = CashuWallet::new(&config.mint_url, CurrencyUnit::Sat, localstore, seed, None)?;
-    let _ = wallet.recover_incomplete_sagas().await;
+    if recover {
+        wallet.recover_incomplete_sagas().await?;
+    }
 
     Ok(Arc::new(Mutex::new(wallet)))
 }

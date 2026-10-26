@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use tokio::sync::RwLock;
 
-use super::{WalletConfig, WalletHandle, open_wallet};
+use super::{WalletConfig, WalletHandle, open_wallet_with_recovery};
 
 pub struct MultiMintWalletManager {
     canonical_mint: String,
@@ -47,7 +47,8 @@ impl MultiMintWalletManager {
 
         let wallet_dir = self.foreign_wallet_dir(mint_url);
         let config = WalletConfig::new(mint_url.to_string(), Some(wallet_dir.clone()));
-        let wallet = open_wallet(&config)
+        // Foreign conversions require transaction-specific reconciliation, not bulk recovery.
+        let wallet = open_wallet_with_recovery(&config, false)
             .await
             .with_context(|| format!("opening wallet for foreign mint {mint_url}"))?;
         guard.insert(mint_url.to_string(), wallet.clone());
