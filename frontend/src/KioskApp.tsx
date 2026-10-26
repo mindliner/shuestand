@@ -17,7 +17,6 @@ import { config } from './config'
 import { copyTextWithFallback } from './lib/clipboard'
 import { detectTokenMint } from './lib/cashu'
 import { isValidBitcoinAddress } from './lib/bitcoin'
-import type { Theme } from './lib/theme'
 import type {
   CreateWithdrawalRequest,
   SessionStartResponse,
@@ -43,10 +42,6 @@ import {
 import { AppVersion } from './components/AppVersion'
 
 type Flow = 'deposit' | 'withdrawal'
-type KioskAppProps = {
-  theme: Theme
-  onThemeSelect: (mode: Theme) => void
-}
 type TokenMintInfo =
   | { mintUrl: string; isForeign: boolean; amount: number }
   | { error: string }
@@ -88,7 +83,7 @@ const normalizeError = (err: unknown): Error | null => {
   return err instanceof Error ? err : new Error(String(err))
 }
 
-export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
+export function KioskApp() {
   const [flow, setFlow] = useState<Flow>('deposit')
   const [depositAmount, setDepositAmount] = useState(DEFAULT_DEPOSIT_AMOUNT)
   const [withdrawalAmount, setWithdrawalAmount] = useState(DEFAULT_WITHDRAWAL_AMOUNT)
@@ -1081,22 +1076,6 @@ export function KioskApp({ theme, onThemeSelect }: KioskAppProps) {
           <p className="lede">{headerDescription}</p>
         </div>
         <div className="header-actions">
-          <div className="theme-toggle" role="group" aria-label="Color theme">
-            <button
-              type="button"
-              className={theme === 'light' ? 'active' : ''}
-              onClick={() => onThemeSelect('light')}
-            >
-              Day
-            </button>
-            <button
-              type="button"
-              className={theme === 'dark' ? 'active' : ''}
-              onClick={() => onThemeSelect('dark')}
-            >
-              Night
-            </button>
-          </div>
           <button
             type="button"
             className="link-button"

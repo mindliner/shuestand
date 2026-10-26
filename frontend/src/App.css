@@ -32,14 +32,14 @@
   --color-link: var(--primary);
   --color-error: var(--destructive);
   --color-input-placeholder: var(--muted-foreground);
-  --color-theme-pill-bg: var(--accent);
-  --color-theme-pill-border: var(--border);
   --color-success: var(--primary);
   --color-warning: oklch(0.50 0.12 65);
 }
 
-[data-theme='dark'], .dark {
-  --color-warning: oklch(0.82 0.13 80);
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-warning: oklch(0.82 0.13 80);
+  }
 }
 
 button, input, textarea, select {
@@ -97,7 +97,6 @@ header {
   align-items: flex-end;
 }
 
-.theme-toggle,
 .view-toggle,
 .mode-toggle {
   display: inline-flex;
@@ -107,7 +106,6 @@ header {
   background: var(--color-toggle-bg);
 }
 
-.theme-toggle button,
 .view-toggle button,
 .mode-toggle button {
   border: none;
@@ -120,7 +118,6 @@ header {
   transition: background 0.15s ease, color 0.15s ease;
 }
 
-.theme-toggle button.active,
 .view-toggle button.active,
 .mode-toggle button.active {
   background: var(--primary);

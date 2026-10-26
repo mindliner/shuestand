@@ -2,7 +2,6 @@ import { useMemo, useState, type FormEvent } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { AppVersion } from './components/AppVersion'
 import { submitSupportMessage } from './lib/api'
-import type { Theme } from './lib/theme'
 
 type SessionInfo = {
   id: string
@@ -26,12 +25,8 @@ function readSession(): SessionInfo | null {
   }
 }
 
-type SupportAppProps = {
-  theme: Theme
-  onThemeSelect: (mode: Theme) => void
-}
 
-export function SupportApp({ theme, onThemeSelect }: SupportAppProps) {
+export function SupportApp() {
   const navigate = useNavigate()
   const location = useLocation()
   const [text, setText] = useState('')
@@ -77,10 +72,6 @@ export function SupportApp({ theme, onThemeSelect }: SupportAppProps) {
           <p className="lede">If something went wrong, briefly describe what happened here.</p>
         </div>
         <div className="header-actions">
-          <div className="theme-toggle" role="group" aria-label="Color theme">
-            <button type="button" className={theme === 'light' ? 'active' : ''} onClick={() => onThemeSelect('light')}>Day</button>
-            <button type="button" className={theme === 'dark' ? 'active' : ''} onClick={() => onThemeSelect('dark')}>Night</button>
-          </div>
           <button type="button" className="link-button" onClick={() => navigate('/')}>Back to kiosk</button>
         </div>
       </header>
