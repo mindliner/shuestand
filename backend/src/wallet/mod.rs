@@ -58,6 +58,29 @@ async fn open_wallet_with_recovery(config: &WalletConfig, recover: bool) -> Resu
     Ok(Arc::new(Mutex::new(wallet)))
 }
 
+/// Maintenance only: existing stores/seed required; never run saga recovery.
+/// Caller must exclusively own the wallet directory (backend stopped).
+pub async fn open_existing_wallet_no_recovery(config: &WalletConfig) -> Result<WalletHandle> {
+    let base = config.base_dir();
+    anyhow::ensure!(
+        base.join("wallet.sqlite").is_file(),
+        "existing wallet.sqlite required"
+    );
+    let bytes = fs::read(base.join("seed"))?;
+    let seed: [u8; 64] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("existing 64-byte seed required"))?;
+    let db = CashuSqliteDatabase::new(base.join("wallet.sqlite")).await?;
+    let wallet = CashuWallet::new(
+        &config.mint_url,
+        CurrencyUnit::Sat,
+        Arc::new(db),
+        seed,
+        None,
+    )?;
+    Ok(Arc::new(Mutex::new(wallet)))
+}
+
 pub fn default_wallet_dir() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)

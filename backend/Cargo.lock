@@ -315,6 +315,7 @@ dependencies = [
  "prometheus-client",
  "rand 0.8.8",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_cbor",
  "serde_json",

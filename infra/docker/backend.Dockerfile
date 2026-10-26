@@ -18,6 +18,7 @@ FROM debian:bookworm-slim
 RUN useradd --create-home shuestand
 WORKDIR /app
 COPY --from=builder /app/backend/target/release/backend /usr/local/bin/shuestand-backend
+COPY --from=builder /app/backend/target/release/m5_recover /usr/local/bin/shuestand-m5-recover
 COPY backend/migrations ./migrations
 RUN mkdir -p /data/cashu \
     && chown -R shuestand:shuestand /data
